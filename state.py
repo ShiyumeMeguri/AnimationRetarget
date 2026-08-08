@@ -83,6 +83,25 @@ def _on_mapping_edit(self, context):
     _refresh_preview(get_state(context))
 
 
+def root_bone_names(dest_obj):
+    """目标骨架的根骨 (无父级)。根骨承载整体位移, 只传旋转的话角色会原地不动。"""
+    return {b.name for b in dest_obj.data.bones
+            if b.parent is None} if dest_obj else set()
+
+
+def setup_root_loc(state, dest_obj):
+    """把映射到根骨的那几条自动打开位移传递 (AUTO = 按髋高比缩放并重定基点,
+    能吃掉两个骨架摆位不同带来的偏移)。返回被设置的条数。"""
+    roots = root_bone_names(dest_obj)
+    n = 0
+    for m in state.mappings:
+        if m.dest in roots and not m.loc_enabled:
+            m['loc_enabled'] = True
+            m.loc_scale_mode = 'AUTO'
+            n += 1
+    return n
+
+
 def mapping_matches(mapping, query):
     """空格分隔的多个词全部命中(自身骨或来源骨任一侧)才算匹配。"""
     if not query:
@@ -395,22 +414,32 @@ class AnimRetState(bpy.types.PropertyGroup):
         }
 
     def to_spec(self, dest_obj=None):
-        return {
-            'format': 'AnimationRetarget',
-            'version': 2,
-            'source_armature': self.source.name if self.source else '',
-            'dest_armature': dest_obj.name if dest_obj else '',
-            'settings': self.settings_spec(),
-            'mappings': self.mappings_spec(),
-        }
+        # 与骨架转换面板同一种落盘格式 (presets.make_spec), 只有一种形状
+        return presets.make_spec(
+            self.mappings_spec(),
+            source_armature=self.source.name if self.source else '',
+            dest_armature=dest_obj.name if dest_obj else '',
+            settings=self.settings_spec())
 
     def from_spec(self, spec, context=None):
         self.mappings.clear()
         self.selected_count = 0
         # 映射表与骨架改名表通用: 改名表的 from/to 就是这里的 source/dest
-        for src, dst, extra in presets.normalize_pairs(spec):
+        # 只记下标: 集合 .add() 扩容会让先前取到的元素引用失效, 存引用会静默写空
+        no_loc = []
+        for i, (src, dst, extra) in enumerate(presets.normalize_pairs(spec)):
             m = self.mappings.add()
             m.from_spec(dict(extra, source=src, dest=dst))
+            if 'loc' not in extra:
+                no_loc.append(i)
+        # 配置没写 loc 的 (改名表就没这一项), 根骨自动开位移 —— 否则烘出来
+        # 只有姿势没有整体移动
+        roots = root_bone_names(get_dest_object(context))
+        for i in no_loc:
+            m = self.mappings[i]
+            if m.dest in roots:
+                m['loc_enabled'] = True
+                m.loc_scale_mode = 'AUTO'
         self.active_mapping = 0 if len(self.mappings) else -1
         settings = spec.get('settings', {})
         if 'frame_step' in settings:

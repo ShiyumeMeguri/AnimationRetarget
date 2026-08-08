@@ -36,12 +36,11 @@ import bpy
 from . import presets
 from .state import resolve_dest_object
 
+# 骨架结构导出是另一种数据(骨骼层级快照, 不是映射), 所以单独一个目录;
+# 改名表 = 映射表, 共用 presets.PRESET_SUBDIR 那一个配置目录。
 SKELETON_EXPORT_SUBDIR = 'presets/AnimationRetarget/SkeletonConfig'
-SKELETON_RENAME_SUBDIR = 'presets/AnimationRetarget/SkeletonRename'
 SKELETON_FORMAT = 'AnimationRetargetSkeleton'
 SKELETON_VERSION = 1
-RENAME_FORMAT = 'AnimationRetargetSkeletonRename'
-RENAME_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -150,23 +149,23 @@ def write_skeleton_export(obj):
 # ---------------------------------------------------------------------------
 
 def rename_preset_dir(create=True):
-    return presets.preset_dir(SKELETON_RENAME_SUBDIR, create=create)
+    return presets.preset_dir(create=create)
 
 
 def list_rename_presets():
-    return presets.list_presets(SKELETON_RENAME_SUBDIR)
+    return presets.list_presets()
 
 
 def save_rename_preset(name, spec):
-    return presets.save_preset(name, spec, SKELETON_RENAME_SUBDIR)
+    return presets.save_preset(name, spec)
 
 
 def load_rename_preset(name):
-    return presets.load_preset(name, SKELETON_RENAME_SUBDIR)
+    return presets.load_preset(name)
 
 
 def delete_rename_preset(name):
-    return presets.delete_preset(name, SKELETON_RENAME_SUBDIR)
+    return presets.delete_preset(name)
 
 
 # ---------------------------------------------------------------------------
@@ -236,8 +235,6 @@ class AnimRetPresetEntry(bpy.types.PropertyGroup):
     """配置浏览器里的一行 (磁盘上的一个配置文件)。"""
     name: bpy.props.StringProperty()      # 文件名(不含扩展名)
     label: bpy.props.StringProperty()     # display_name, 没有就用文件名
-    subdir: bpy.props.StringProperty()
-    count: bpy.props.IntProperty()
 
 
 def count_directions(obj, pairs):
@@ -254,12 +251,11 @@ def _on_browse_select(self, context):
         return
     e = self.entries[self.active_entry]
     try:
-        spec = presets.load_preset(e.name, e.subdir)
+        spec = presets.load_preset(e.name)
     except Exception:
         return
     self.from_spec(spec)
     self.active_preset = e.name
-    self.active_subdir = e.subdir
 
 
 class AnimRetSkeletonToolState(bpy.types.PropertyGroup):
@@ -282,24 +278,17 @@ class AnimRetSkeletonToolState(bpy.types.PropertyGroup):
     active_preset: bpy.props.StringProperty(
         default='', description='当前加载的骨架转换预设名 ("保存"直接覆盖此预设)',
         override={'LIBRARY_OVERRIDABLE'})
-    active_subdir: bpy.props.StringProperty(
-        default=SKELETON_RENAME_SUBDIR,
-        description='当前预设所在目录 (改名表与映射表通用, 从哪来存回哪去)',
-        override={'LIBRARY_OVERRIDABLE'})
     display_name: bpy.props.StringProperty(
         default='', name='显示名称',
         description='该预设在菜单中显示的自定义名字, 与磁盘文件名分开',
         override={'LIBRARY_OVERRIDABLE'})
 
     def to_spec(self, source_armature=''):
-        return {
-            'format': RENAME_FORMAT,
-            'version': RENAME_VERSION,
-            'display_name': self.display_name,
-            'source_armature': source_armature,
-            'renames': [{'from': p.old_name, 'to': p.new_name}
-                       for p in self.pairs if p.old_name and p.new_name],
-        }
+        # 与映射面板同一种落盘格式, 不再另出一种 renames 形状
+        return presets.make_spec(
+            [{'source': p.old_name, 'dest': p.new_name}
+             for p in self.pairs if p.old_name and p.new_name],
+            display_name=self.display_name, source_armature=source_armature)
 
     def from_spec(self, spec):
         self.pairs.clear()
@@ -324,10 +313,9 @@ def refresh_entries(state):
     """重扫两个配置目录, 填进浏览器列表 (改名表与映射表通用, 一起列)。"""
     keep = state.active_preset
     state.entries.clear()
-    for label, name, subdir in presets.list_all_presets():
+    for label, name in presets.list_all_presets():
         e = state.entries.add()
         e.name = name
-        e.subdir = subdir
         e.label = label
     idx = next((i for i, e in enumerate(state.entries) if e.name == keep), -1)
     state['active_entry'] = idx          # 绕过 update, 不重复加载

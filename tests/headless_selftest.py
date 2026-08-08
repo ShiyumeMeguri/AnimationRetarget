@@ -796,6 +796,59 @@ def phase_operators():
           len(bpy.data.objects) == n_obj_before and
           sum(len(pb.constraints) for pb in dst.pose.bones) == 0)
 
+    # 根骨自动位移 + 分页恢复默认
+    from AnimationRetarget.state import root_bone_names
+    roots = root_bone_names(dst)
+    check('根骨识别 (DstRig 的 Root 无父级)', roots == {'Root'})
+
+    # 加载改名表(没有 loc 项)时, 根骨应当自动开位移
+    s.from_spec({'renames': [{'from': 'hips', 'to': 'Root'},
+                             {'from': 'spine', 'to': 'Spine'},
+                             {'from': 'hand', 'to': 'Hand'}]})
+    auto = [(m.dest, m.loc_scale_mode) for m in s.mappings if m.loc_enabled]
+    check('加载改名表时根骨自动开位移 %s' % auto, auto == [('Root', 'AUTO')])
+    s.mappings[0].dest = 'Root'          # 把首条映射指到根骨
+    s.mappings[0]['loc_enabled'] = False
+    r = bpy.ops.animret.setup_root_loc()
+    check('操作符: 根骨自动位移 FINISHED', r == {'FINISHED'})
+    check('根骨位移已开启且为 AUTO',
+          s.mappings[0].loc_enabled and s.mappings[0].loc_scale_mode == 'AUTO')
+
+    # 改一堆参数, 再按页恢复
+    for m in s.mappings:
+        m.rot_offset = (0.5, 0.5, 0.5)
+        m.rot_auto = False
+        m.ik_enabled = True
+        m.ik_chain = 5
+    s.editing_type = 1                   # 旋转页
+    bpy.ops.animret.reset_tab()
+    check('恢复旋转页: rot_offset 归零且 rot_auto 回默认',
+          all(max(abs(v) for v in m.rot_offset) < 1e-9 and m.rot_auto
+              for m in s.mappings))
+    check('恢复旋转页: 不碰 IK 页的参数',
+          all(m.ik_enabled and m.ik_chain == 5 for m in s.mappings))
+    s.editing_type = 3                   # IK 页
+    bpy.ops.animret.reset_tab()
+    check('恢复 IK 页: ik 回默认',
+          all(not m.ik_enabled and m.ik_chain == 2 for m in s.mappings))
+    s.editing_type = 2                   # 位移页
+    bpy.ops.animret.reset_tab()
+    check('恢复位移页后根骨位移被自动补回',
+          s.mappings[0].loc_enabled and s.mappings[0].loc_scale_mode == 'AUTO')
+    check('恢复位移页: 非根骨的位移已关闭',
+          all(not m.loc_enabled for m in s.mappings if m.dest not in roots))
+
+    # 上面几项换过映射表, 恢复成本阶段约定的 5 条, 供后续测试继续用
+    s.mappings.clear()
+    for sn, dn in (('hips', 'Hips'), ('spine', 'Spine'),
+                   ('upperarm', 'UpArm'), ('forearm', 'LoArm'),
+                   ('hand', 'Hand')):
+        m = s.mappings.add()
+        m.dest, m.source = dn, sn
+    s.mappings[0].loc_enabled = True
+    s.mappings[0].loc_scale_mode = 'AUTO'
+    s.editing_type = 0
+
     # 映射表的骨骼搜索过滤
     from AnimationRetarget.state import mapping_matches
     def mhit(q):
@@ -809,6 +862,37 @@ def phase_operators():
     s.mapping_filter = 'hips'
     r = bpy.ops.animret.clear_mapping_filter()
     check('操作符: 清空映射搜索', r == {'FINISHED'} and s.mapping_filter == '')
+
+    # 绑定不得阻挡"清理未使用数据": 删掉骨架后必须放开 ID 指针
+    keep = build_armature('KeepRig', SRC_BONES)
+    s.source = keep
+    check('绑定会给对象记一个 user', keep.users == 2)
+    for o in bpy.data.objects:
+        o.select_set(False)
+    keep.select_set(True)
+    bpy.context.view_layer.objects.active = keep
+    bpy.ops.object.delete()                 # 视图里 X 删除 = 从集合解链
+    bpy.context.view_layer.update()
+    left = bpy.data.objects.get('KeepRig')
+    check('删除后绑定被自动放开', s.source is None)
+    check('删除后对象 users 归零 (purge 才清得掉)',
+          left is None or left.users == 0)
+    bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True,
+                                   do_recursive=True)
+    check('清理未使用数据能清掉它',
+          'KeepRig' not in bpy.data.objects
+          and 'KeepRig' not in bpy.data.armatures)
+
+    # 反例: 只是不在场景里(放在游离集合)不算删除, 绑定不能被误清
+    det = build_armature('DetachedRig', SRC_BONES)
+    s.source = det
+    col = bpy.data.collections.new('Detached')
+    col.objects.link(det)
+    bpy.context.scene.collection.objects.unlink(det)
+    bpy.context.view_layer.update()
+    core.release_deleted_refs()
+    check('游离集合里的对象不会被误清', s.source is det)
+    s.source = src
 
     # 嵌入配置可被 CLI 的 IDProp 读取路径解析
     cli = __import__(PKG + '.cli', fromlist=['x'])
@@ -974,21 +1058,37 @@ def phase_skeleton_rename():
           and report2['collided'][0][0] == 'ArmR'
           and report2['collided'][0][2] != 'X')
 
-    # --- 重命名预设 JSON 往返 (display_name 自定义显示, 与映射预设目录隔离) ---
-    spec = {'format': skel.RENAME_FORMAT, 'version': skel.RENAME_VERSION,
+    # --- 配置只有一个目录、一种格式 (禁止双重系统) ---
+    spec = {'format': presets_mod.FORMAT, 'version': presets_mod.VERSION,
             'display_name': 'EndField_Si → Ruri', 'source_armature': 'EndField_Si',
             'renames': [{'from': 'J_Bip_C_Hips', 'to': 'Hips'}]}
     p1 = skel.save_rename_preset('_selftest_skel_rename', spec)
-    check('重命名预设保存落盘', os.path.isfile(p1))
-    check('重命名预设列表可见',
-          '_selftest_skel_rename' in skel.list_rename_presets())
+    check('配置保存落盘', os.path.isfile(p1))
+    check('配置在唯一目录里可见',
+          '_selftest_skel_rename' in presets_mod.list_presets())
+    check('两个面板看到的是同一个目录',
+          skel.list_rename_presets() == presets_mod.list_presets()
+          and skel.rename_preset_dir() == presets_mod.preset_dir())
     loaded = skel.load_rename_preset('_selftest_skel_rename')
-    check('重命名预设 display_name 往返',
-          loaded['display_name'] == 'EndField_Si → Ruri')
-    check('重命名预设目录与映射预设目录互不干扰',
-          '_selftest_skel_rename' not in presets_mod.list_presets())
+    check('display_name 往返', loaded['display_name'] == 'EndField_Si → Ruri')
+    # 读改名表 → 存回去, 必须覆盖同一个文件而不是在别处再生成一份
+    n_before = len(presets_mod.list_presets())
+    pairs = [{'source': s_, 'dest': d_}
+             for s_, d_, _e in presets_mod.normalize_pairs(loaded)]
+    p2 = skel.save_rename_preset(
+        '_selftest_skel_rename',
+        presets_mod.make_spec(pairs, display_name=loaded['display_name']))
+    check('读了再存 = 覆盖同一文件, 不产生第二份',
+          p2 == p1 and len(presets_mod.list_presets()) == n_before)
+    round2 = presets_mod.load_preset('_selftest_skel_rename')
+    check('落盘格式只有 mappings 一种形状',
+          'mappings' in round2 and 'renames' not in round2
+          and round2['format'] == presets_mod.FORMAT)
+    check('改写成 mappings 后内容不丢',
+          [(m['source'], m['dest']) for m in round2['mappings']]
+          == [('J_Bip_C_Hips', 'Hips')])
     skel.delete_rename_preset('_selftest_skel_rename')
-    check('重命名预设删除', not os.path.isfile(p1))
+    check('配置删除', not os.path.isfile(p1))
 
     # --- 操作符集成 ---
     reset_blend()
@@ -1040,7 +1140,7 @@ def phase_skeleton_rename():
 
     # 配置浏览器: 磁盘上的配置直接列出来
     skel.save_rename_preset('_selftest_browse', {
-        'format': skel.RENAME_FORMAT, 'version': skel.RENAME_VERSION,
+        'format': presets_mod.FORMAT, 'version': presets_mod.VERSION,
         'display_name': '浏览器测试', 'source_armature': '',
         'renames': [{'from': 'ArmL', 'to': 'Arm_L'},
                     {'from': 'ArmR', 'to': 'Arm_R'}]})

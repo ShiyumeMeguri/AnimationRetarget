@@ -21,7 +21,8 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from . import core
 from . import presets
-from .state import get_state, get_dest_object
+from .state import (get_state, get_dest_object, setup_root_loc,
+                    root_bone_names)
 
 
 def _alert(title, message):
@@ -142,6 +143,63 @@ class ANIMRET_OT_push_nla(_StateOperator, bpy.types.Operator):
 # ---------------------------------------------------------------------------
 # 列表与映射工具
 # ---------------------------------------------------------------------------
+
+# 各标签页负责的属性 —— 恢复默认时按页只重置这些, 不碰别的页
+_TAB_PROPS = {
+    1: ('rot_auto', 'rot_ortho', 'rot_offset', 'align_set', 'align_rot'),
+    2: ('loc_enabled', 'loc_axes', 'loc_scale_mode', 'loc_scale'),
+    3: ('ik_enabled', 'ik_influence', 'ik_chain'),
+}
+_TAB_NAME = {0: '全部', 1: '旋转', 2: '位移', 3: 'IK'}
+
+
+class ANIMRET_OT_reset_tab(_StateOperator, bpy.types.Operator):
+    bl_idname = 'animret.reset_tab'
+    bl_label = '恢复本页默认'
+    bl_description = ('把当前标签页的参数全部恢复默认值 (映射页 = 三页一起恢复)\n'
+                      '骨骼配对本身不受影响')
+    bl_options = {'UNDO'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        s = get_state(context)
+        tab = s.editing_type
+        props = _TAB_PROPS.get(tab) or sum((_TAB_PROPS[t] for t in (1, 2, 3)), ())
+        for m in s.mappings:
+            for p in props:
+                m.property_unset(p)       # 恢复属性声明里的默认值, 不写死常量
+        # 位移被重置后根骨会失去位移传递, 顺手补回去 (它本就该开着)
+        n = setup_root_loc(s, get_dest_object(context)) if tab in (0, 2) else 0
+        core.preview_refresh(s, get_dest_object(context))
+        self.report({'INFO'}, '已恢复 %s 页默认 (%d 条映射)%s'
+                    % (_TAB_NAME.get(tab, '?'), len(s.mappings),
+                       '; 根骨位移已重新开启 %d 条' % n if n else ''))
+        return {'FINISHED'}
+
+
+class ANIMRET_OT_setup_root_loc(_StateOperator, bpy.types.Operator):
+    bl_idname = 'animret.setup_root_loc'
+    bl_label = '根骨自动位移'
+    bl_description = ('给映射到根骨(无父级的骨)的条目打开位移传递, 缩放设为自动\n'
+                      '不开的话烘出来只有姿势、角色整体不会移动')
+    bl_options = {'UNDO'}
+
+    def execute(self, context):
+        s = get_state(context)
+        dest = get_dest_object(context)
+        n = setup_root_loc(s, dest)
+        roots = sorted(root_bone_names(dest))
+        if not n:
+            self.report({'WARNING'}, '没有需要设置的根骨映射 (根骨: %s)'
+                        % (', '.join(roots) or '无'))
+            return {'CANCELLED'}
+        core.preview_refresh(s, dest)
+        self.report({'INFO'}, '已为 %d 条根骨映射开启位移 (根骨: %s)'
+                    % (n, ', '.join(roots)))
+        return {'FINISHED'}
+
 
 class ANIMRET_OT_clear_mapping_filter(_StateOperator, bpy.types.Operator):
     bl_idname = 'animret.clear_mapping_filter'
@@ -549,13 +607,11 @@ class ANIMRET_OT_preset_load(_StateOperator, bpy.types.Operator):
     bl_options = {'UNDO'}
 
     name: bpy.props.StringProperty()
-    subdir: bpy.props.StringProperty(default=presets.PRESET_SUBDIR)
 
     def execute(self, context):
         s = get_state(context)
         try:
-            spec = presets.load_preset(self.name,
-                                       self.subdir or presets.PRESET_SUBDIR)
+            spec = presets.load_preset(self.name)
         except Exception as e:
             self.report({'ERROR'}, '加载失败: %s' % e)
             return {'CANCELLED'}
@@ -645,6 +701,8 @@ classes = (
     ANIMRET_OT_bake,
     ANIMRET_OT_bake_all,
     ANIMRET_OT_push_nla,
+    ANIMRET_OT_reset_tab,
+    ANIMRET_OT_setup_root_loc,
     ANIMRET_OT_clear_mapping_filter,
     ANIMRET_OT_select_edit_type,
     ANIMRET_OT_select_action,

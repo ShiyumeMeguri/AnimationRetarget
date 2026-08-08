@@ -687,17 +687,55 @@ def preview_suspended():
         _preview_jobs = saved
 
 
+_releasing = False
+
+
+def release_deleted_refs():
+    """放开指向"已被删除对象"的绑定, 返回清掉的条数。
+
+    目标骨架/动画来源是 ID 指针, 会给对象记一个 user。用户在视图里删骨架只是
+    从集合解链, 对象带着我们这个 user 赖在 bpy.data 里, "清理未使用数据" 就
+    永远清不掉它 (连它的骨架数据一起留下)。
+    判据用 users_collection: 任何集合都不在 = 真的被删了; 只是没链接到场景
+    (放在游离集合里) 仍然算数, 不能误清。
+    """
+    global _releasing
+    if _releasing:
+        return 0
+    n = 0
+    _releasing = True
+    try:
+        for scene in bpy.data.scenes:
+            obj = getattr(scene, 'animret_dest', None)
+            if obj is not None and not obj.users_collection:
+                scene.animret_dest = None
+                n += 1
+        for arm in bpy.data.armatures:
+            state = getattr(arm, 'animret', None)
+            if state is None:
+                continue
+            obj = state.source
+            if obj is not None and not obj.users_collection:
+                state.source = None
+                n += 1
+    finally:
+        _releasing = False
+    return n
+
+
 def _on_frame_change(scene, depsgraph=None):
     _apply_preview_all(depsgraph)
 
 
 def _on_depsgraph_update(scene, depsgraph=None):
+    release_deleted_refs()
     _apply_preview_all(depsgraph)
 
 
 def _on_load_post(_dummy=None):
     """打开文件时强制关闭一切预览 — 预览是会话态, 绝不常驻。"""
     _preview_jobs.clear()
+    release_deleted_refs()
     for arm in bpy.data.armatures:
         st = getattr(arm, 'animret', None)
         if st is not None and st.preview:

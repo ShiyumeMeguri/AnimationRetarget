@@ -201,8 +201,7 @@ class ANIMRETSK_OT_preset_delete(bpy.types.Operator):
         if not s.active_preset:
             self.report({'WARNING'}, '当前没有选中配置')
             return {'CANCELLED'}
-        if presets.delete_preset(s.active_preset, s.active_subdir
-                                 or skeleton_rename.SKELETON_RENAME_SUBDIR):
+        if presets.delete_preset(s.active_preset):
             self.report({'INFO'}, '已删除配置 %s' % s.active_preset)
         s.active_preset = ''
         s.pairs.clear()

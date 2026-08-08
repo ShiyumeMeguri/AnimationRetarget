@@ -26,8 +26,9 @@ import re
 
 import bpy
 
+# 唯一的配置目录。重定向映射表和骨架改名表本质是同一种东西, 所以不分家 ——
+# 分两个目录会导致"读了这边的、存到那边去", 同一份配置在浏览器里出现两条。
 PRESET_SUBDIR = 'presets/AnimationRetarget'
-SKELETON_RENAME_SUBDIR = 'presets/AnimationRetarget/SkeletonRename'
 _INVALID = re.compile(r'[\\/:*?"<>|]+')
 
 
@@ -35,9 +36,9 @@ def normalize_pairs(spec):
     """任何一种配置 → [(源骨名, 目标骨名, 该条的附加参数dict), …]
 
     重定向映射表和骨架改名表本质是同一种东西 —— 都是有序的"源骨名 → 目标骨名",
-    只是语义不同 (改名 = 同一骨架内换名字, 重定向 = 跨骨架传动画)。所以两边
-    互相通用: 改名表能直接当重定向映射用, 反之亦然。附加参数 (rot/loc/ik) 只有
-    重定向配置才有, 改名表缺这些时按默认值走。
+    只是语义不同 (改名 = 同一骨架内换名字, 重定向 = 跨骨架传动画)。
+    写盘一律用 mappings (见 pairs_spec), renames 只是读侧兼容 AI 手写的简写。
+    附加参数 (rot/loc/ik) 只有重定向配置才有, 改名表缺这些时按默认值走。
     """
     out = []
     for m in spec.get('mappings') or ():
@@ -49,6 +50,27 @@ def normalize_pairs(spec):
         if s and d:
             out.append((s, d, {}))
     return out
+
+
+FORMAT = 'AnimationRetarget'
+VERSION = 3
+
+
+def make_spec(pairs, display_name='', source_armature='', dest_armature='',
+              settings=None):
+    """唯一的落盘格式: mappings 一条一条 {source, dest, …}。
+
+    两个面板都用它写, 所以同一份配置只会有一个文件、一种形状。
+    """
+    return {
+        'format': FORMAT,
+        'version': VERSION,
+        'display_name': display_name,
+        'source_armature': source_armature,
+        'dest_armature': dest_armature,
+        'settings': settings or {},
+        'mappings': pairs,
+    }
 
 
 def preset_dir(subdir=PRESET_SUBDIR, create=True):
@@ -98,25 +120,17 @@ def delete_preset(name, subdir=PRESET_SUBDIR):
 
 
 def list_all_presets():
-    """两个目录的配置合并列出 → [(显示名, 预设名, subdir), …]。
-
-    映射预设与骨架改名表通用 (见 normalize_pairs), 所以两个面板的菜单都把
-    两边一起列出来, 省得为了"配置不通用"而没法选。
-    """
+    """唯一配置目录里的全部配置 → [(显示名, 预设名), …]。"""
     out = []
-    for subdir, tag in ((PRESET_SUBDIR, ''),
-                        (SKELETON_RENAME_SUBDIR, '改名表')):
-        for name in list_presets(subdir):
-            label = name
-            try:
-                spec = load_preset(name, subdir)
-                label = spec.get('display_name') or name
-                n = len(normalize_pairs(spec))
-            except Exception:
-                n = -1
-            if tag:
-                label = '%s  [%s]' % (label, tag)
-            if n >= 0:
-                label = '%s (%d)' % (label, n)
-            out.append((label, name, subdir))
+    for name in list_presets():
+        label = name
+        try:
+            spec = load_preset(name)
+            label = spec.get('display_name') or name
+            n = len(normalize_pairs(spec))
+        except Exception:
+            n = -1
+        if n >= 0:
+            label = '%s (%d)' % (label, n)
+        out.append((label, name))
     return out

@@ -90,11 +90,9 @@ class ANIMRET_MT_presets(bpy.types.Menu):
         if not items:
             layout.label(text='(没有预设, 用右侧按钮保存)')
             return
-        for label, name, subdir in items:
-            op = layout.operator('animret.preset_load', text=label,
-                                 translate=False)
-            op.name = name
-            op.subdir = subdir
+        for label, name in items:
+            layout.operator('animret.preset_load', text=label,
+                            translate=False).name = name
 
 
 class ANIMRET_MT_settings(bpy.types.Menu):
@@ -149,6 +147,8 @@ def _draw_mapping_block(layout):
                                   icon='UV_SYNC_SELECT').action = 'INVERSE'
     box_right = box.row(align=False)
     box_right.alignment = 'RIGHT'
+    box_right.operator('animret.reset_tab', text='', icon='LOOP_BACK')
+    box_right.separator()
     for t, (label, icon) in enumerate((
             ('映射', 'PRESET'), ('旋转', 'CON_ROTLIKE'),
             ('位移', 'CON_LOCLIKE'), ('ＩＫ', 'CON_KINEMATIC'))):
@@ -193,6 +193,7 @@ def _draw_mapping_block(layout):
     right.operator('animret.list_action', icon='TRIA_DOWN',
                    text='').action = 'DOWN'
     right.separator()
+    right.operator('animret.setup_root_loc', icon='CON_LOCLIKE', text='')
     right.operator('animret.guess_mapping', icon='SHADERFX', text='')
     right.operator('animret.child_mapping', icon='CON_CHILDOF', text='')
     right.operator('animret.name_mapping', icon='FORWARD', text='')
