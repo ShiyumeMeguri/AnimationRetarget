@@ -34,6 +34,66 @@
 产物命名 = `源动作名 + 后缀` (默认 `_baked`), 同名**原地覆盖更新** (保持 NLA 引用), 并打上
 `animret_generated` 标签 (批量烘焙永不会把产物当输入)。
 
+## 骨架转换 (重命名) — 独立于映射的额外功能
+
+侧栏同一 `AnimRetarget` 分类下另有一个独立面板 **"骨架转换 (重命名)"** (默认折叠,
+对应 `skeleton_rename.py` / `ops_skeleton_rename.py` / `ui_skeleton_rename.py`)。
+用途: 把一个骨架的骨骼名整体改成另一套命名规范 (例如把外部/游戏导入骨架的命名
+对齐到项目自己的骨架命名), 交给 AI 读结构、代为识别与重命名。与上面的映射
+预设是两套完全独立的数据、独立的目录、独立的 JSON 格式。
+
+工作流:
+
+1. **同时选中来源骨架与目标骨架**, 点击面板 ① 里的**导出骨架结构** →
+   选中几个就导出几份, 各自固定路径原地覆盖 (不留旧档, 不用每次手动另存):
+   `<Blender 用户脚本目录>/presets/AnimationRetarget/SkeletonConfig/<骨架名>.json`
+   本机 (RuriConfig 自定义脚本路径) 的实际路径:
+   `D:\Ruri\00.Model\Tools\BlenderProfile\RuriConfig\scripts\presets\AnimationRetarget\SkeletonConfig\`
+2. 把这两份 json 交给 AI: "对比这两个骨架, 把 A 的骨骼名改成 B 的命名规范"。
+   两边骨骼名往往毫无规律可循 (不同游戏/不同管线各写各的), **没法程序化硬编码**,
+   要的就是 AI 拿层级 + 世界空间头尾 + `use_deform` + 蒙皮命中这些结构信息
+   肉眼对比、逐根认语义。AI 直接写出重命名表 json 存进:
+   `<Blender 用户脚本目录>/presets/AnimationRetarget/SkeletonRename/<名字>.json`
+   本机实际路径:
+   `D:\Ruri\00.Model\Tools\BlenderProfile\RuriConfig\scripts\presets\AnimationRetarget\SkeletonRename\`
+3. 回 Blender, **选中要改名的那个骨架** (面板 ② 里的"改名对象"会显示是谁),
+   从预设菜单按 `display_name` 选中 AI 刚写的那份, 点击**应用重命名**。
+   AI 改完文件后点一下刷新按钮即可重新读取, 不用重启。
+
+面板分成 ①② 两块, 因为两步的作用对象不同: ① 作用于**选中的全部骨架**
+(要两个一起导才能对比), ② 只作用于**活动骨架**那一个 (改名是破坏性操作,
+不能一次改两个骨架)。两处都把当前作用对象直接写在按钮上方。
+
+重命名表由 AI 直接写文件、面板只负责读和应用, 所以不提供"导入/导出 JSON"
+按钮 —— 预设菜单读的就是那个目录, 再加一套文件对话框只是同一件事的第二条路径。
+
+重命名只做骨骼名本身的两阶段防冲突改名 (先集体改成临时名再改成最终名, 因此
+A↔B 互换名之类场景也不会互相冲突)。顶点组名 / FCurve 路径 / 同骨架内约束
+subtarget 由 **Blender 引擎自身**的 `Bone.name` setter 联动维护 (逐条属性
+赋值即触发, 不限于走 UI 重命名操作符, 已实测确认) —— 蒙皮与已有动画不会因
+改名而失效, 插件不重复手搓这块。
+
+骨架结构导出 JSON:
+
+```json
+{ "format": "AnimationRetargetSkeleton", "version": 1,
+  "armature": "EndField_Si", "bone_count": 87,
+  "bones": [
+    {"name": "Root", "parent": null, "children": ["Hips"], "depth": 0,
+     "head_world": [0.0, 0.0, 0.0], "tail_world": [0.0, 0.1, 0.0],
+     "length_world": 0.1, "use_connect": false, "use_deform": true,
+     "deform_meshes": ["Body"]}
+  ]}
+```
+
+重命名预设 JSON:
+
+```json
+{ "format": "AnimationRetargetSkeletonRename", "version": 1,
+  "display_name": "EndField_Si → Ruri", "source_armature": "EndField_Si",
+  "renames": [{"from": "J_Bip_C_Hips", "to": "Hips"}] }
+```
+
 ## CLI 无头烘焙 (AI 直接可调)
 
 两种运行方式任选:
@@ -89,4 +149,5 @@ blender -b --factory-startup --python tests\headless_selftest.py
 
 FK 忠实度(vs depsgraph) / 约束式结果数值等价 / 自重定向恒等 / IK 可达 /
 批量逐位确定性 / 单烘==批量 / 根位移非常数 / 隐藏骨照烘 / 零约束零残留 /
-JSON 预设覆盖保存与往返 / 操作符 / CLI 全链路 + FBX。
+JSON 预设覆盖保存与往返 / 操作符 / CLI 全链路 + FBX / 骨架结构导出往返 /
+骨架重命名两阶段防冲突(含互换名)+ 引擎联动顶点组/FCurve/约束校验。

@@ -16,7 +16,8 @@
 import bpy
 
 from . import presets
-from .state import get_state, get_dest_object, resolve_dest_object
+from .state import (get_state, get_dest_object, resolve_dest_object,
+                    mapping_matches)
 
 
 class ANIMRET_UL_mappings(bpy.types.UIList):
@@ -69,7 +70,15 @@ class ANIMRET_UL_mappings(bpy.types.UIList):
         pass
 
     def filter_items(self, context, data, propname):
-        return [], []
+        mappings = getattr(data, propname)
+        s = get_state(context)
+        query = s.mapping_filter if s else ''
+        flags = [self.bitflag_filter_item] * len(mappings)
+        if query:
+            for i, m in enumerate(mappings):
+                if not mapping_matches(m, query):
+                    flags[i] &= ~self.bitflag_filter_item
+        return flags, []
 
 
 class ANIMRET_MT_presets(bpy.types.Menu):
@@ -77,13 +86,15 @@ class ANIMRET_MT_presets(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        names = presets.list_presets()
-        if not names:
+        items = presets.list_all_presets()
+        if not items:
             layout.label(text='(没有预设, 用右侧按钮保存)')
             return
-        for name in names:
-            layout.operator('animret.preset_load', text=name,
-                            translate=False).name = name
+        for label, name, subdir in items:
+            op = layout.operator('animret.preset_load', text=label,
+                                 translate=False)
+            op.name = name
+            op.subdir = subdir
 
 
 class ANIMRET_MT_settings(bpy.types.Menu):
@@ -145,6 +156,13 @@ def _draw_mapping_block(layout):
                            text='' if s.editing_type != t else label,
                            icon=icon, emboss=True,
                            depress=s.editing_type == t).selected_type = t
+
+    srow = left.row(align=True)
+    srow.prop(s, 'mapping_filter', text='', icon='VIEWZOOM')
+    if s.mapping_filter:
+        hit = sum(1 for m in s.mappings if mapping_matches(m, s.mapping_filter))
+        srow.label(text='%d/%d' % (hit, len(s.mappings)))
+        srow.operator('animret.clear_mapping_filter', text='', icon='X')
 
     left.template_list('ANIMRET_UL_mappings', '', s, 'mappings', s,
                        'active_mapping', rows=7)

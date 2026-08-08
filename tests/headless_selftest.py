@@ -693,6 +693,20 @@ def phase_operators():
           len(bpy.data.objects) == n_obj_before and
           sum(len(pb.constraints) for pb in dst.pose.bones) == 0)
 
+    # 映射表的骨骼搜索过滤
+    from AnimationRetarget.state import mapping_matches
+    def mhit(q):
+        return sum(1 for m in s.mappings if mapping_matches(m, q))
+    check('映射搜索: 空 = 全部显示', mhit('') == len(s.mappings))
+    check('映射搜索: 命中自身骨 (uparm -> 1)', mhit('uparm') == 1)
+    check('映射搜索: 命中来源骨 (hips -> 1)', mhit('hips') == 1)
+    check('映射搜索: 大小写不敏感', mhit('HIPS') == 1)
+    check('映射搜索: 多词需全部命中', mhit('arm forearm') == 1)
+    check('映射搜索: 无命中', mhit('zzzz') == 0)
+    s.mapping_filter = 'hips'
+    r = bpy.ops.animret.clear_mapping_filter()
+    check('操作符: 清空映射搜索', r == {'FINISHED'} and s.mapping_filter == '')
+
     # 嵌入配置可被 CLI 的 IDProp 读取路径解析
     cli = __import__(PKG + '.cli', fromlist=['x'])
     embedded = cli.spec_from_idprops(dst.data)
@@ -756,13 +770,214 @@ def phase_cli():
 
 
 # ---------------------------------------------------------------------------
+# Phase 7: 骨架转换(重命名) — 与映射(mapping)完全独立的功能
+# ---------------------------------------------------------------------------
+
+SKEL_BONES = [
+    # name    head              tail              roll  parent   con    inhR  inhS
+    ('Root',  (0, 0, 0.00),    (0, 0.10, 0.00),   0.0,  None,    False, True, 'FULL'),
+    ('Spine', (0, 0, 0.10),    (0, 0, 0.50),      0.0,  'Root',  True,  True, 'FULL'),
+    ('ArmL',  (0.10, 0, 0.50), (0.40, 0, 0.50),   0.0,  'Spine', False, True, 'FULL'),
+    ('ArmR',  (-0.10, 0, 0.50), (-0.40, 0, 0.50), 0.0,  'Spine', False, True, 'FULL'),
+]
+
+
+def phase_skeleton_rename():
+    print('\n== Phase 7: 骨架转换(重命名) — 与映射完全独立 ==')
+    import json
+    skel = __import__(PKG + '.skeleton_rename', fromlist=['x'])
+
+    # --- 导出结构: 层级 / depth / 世界坐标 / 蒙皮命中 ---
+    reset_blend()
+    arm = build_armature('SkelSrc', SKEL_BONES, location=(1, 2, 3))
+    mesh = bpy.data.meshes.new('SkelMesh')
+    mesh_obj = bpy.data.objects.new('SkelMeshObj', mesh)
+    bpy.context.scene.collection.objects.link(mesh_obj)
+    mesh.from_pydata([(0, 0, 0)], [], [])
+    mesh.update()
+    for bname in ('Root', 'Spine', 'ArmL'):
+        mesh_obj.vertex_groups.new(name=bname)
+    mod = mesh_obj.modifiers.new('Armature', 'ARMATURE')
+    mod.object = arm
+
+    snap = skel.export_skeleton(arm)
+    check('导出结构: 骨骼数量', snap['bone_count'] == 4)
+    by_name = {b['name']: b for b in snap['bones']}
+    check('导出结构: 层级 parent/children 正确',
+          by_name['Root']['parent'] is None
+          and by_name['Root']['children'] == ['Spine']
+          and set(by_name['Spine']['children']) == {'ArmL', 'ArmR'}
+          and by_name['ArmL']['parent'] == 'Spine')
+    check('导出结构: depth 正确',
+          by_name['Root']['depth'] == 0 and by_name['Spine']['depth'] == 1
+          and by_name['ArmL']['depth'] == 2)
+    root_head_w = by_name['Root']['head_world']
+    check('导出结构: 世界坐标叠加了物体变换 %s' % root_head_w,
+          all(abs(root_head_w[i] - (1, 2, 3)[i]) < 1e-5 for i in range(3)))
+    check('导出结构: 顶点组命中 (Root 有, ArmR 无)',
+          by_name['Root']['deform_meshes'] == ['SkelMeshObj']
+          and by_name['ArmR']['deform_meshes'] == [])
+
+    path = skel.write_skeleton_export(arm)
+    check('导出结构落盘', os.path.isfile(path))
+    with open(path, 'r', encoding='utf-8') as f:
+        reloaded = json.load(f)
+    check('落盘内容与内存一致', reloaded == snap)
+
+    # --- 重命名: 互换名(ArmL<->ArmR) + 普通改名 + 一个不存在的原名 ---
+    act = make_action(arm, 'SkelAct')
+    key_bone(arm, 'ArmL', 1, quat=Quaternion((0, 0, 1), 0.3))
+    key_bone(arm, 'ArmL', 10, quat=Quaternion((0, 0, 1), -0.3))
+    reset_pose(arm)
+    con = arm.pose.bones['ArmR'].constraints.new('COPY_ROTATION')
+    con.target, con.subtarget = arm, 'ArmL'
+
+    pairs = [('ArmL', 'ArmR'), ('ArmR', 'ArmL'),
+             ('Root', 'Pelvis'), ('Spine', 'Chest'),
+             ('NoSuchBone', 'Whatever')]
+    report = skel.apply_rename(arm, pairs)
+    check('重命名: 4 根骨骼改名成功', len(report['renamed']) == 4)
+    check('重命名: 缺失原名被报告', report['missing'] == ['NoSuchBone'])
+    check('重命名: 无意外冲突', not report['collided'])
+    names_now = {b.name for b in arm.data.bones}
+    check('重命名: 互换名生效 %s' % sorted(names_now),
+          names_now == {'Pelvis', 'Chest', 'ArmL', 'ArmR'})
+    check('重命名: 层级结构未被打乱 (改名不影响父子指针)',
+          arm.data.bones['Chest'].parent.name == 'Pelvis'
+          and arm.data.bones['ArmR'].parent.name == 'Chest')
+
+    # 顶点组名 / FCurve 路径 / 约束 subtarget 是 Blender 引擎自身在
+    # Bone.name setter 里联动维护的, 这里验证经过两阶段临时改名(含互换名)
+    # 中转之后, 引擎联动的最终结果依然正确 (不是我们手搓同步, 见文件头说明)。
+    vg_names = {v.name for v in mesh_obj.vertex_groups}
+    check('引擎联动: 顶点组随骨骼改名(互换名场景) %s' % sorted(vg_names),
+          vg_names == {'Pelvis', 'Chest', 'ArmR'})
+
+    fcurve_paths = {fc.data_path for fc in core.iter_action_fcurves(act)}
+    check('引擎联动: FCurve 路径随骨骼改名 %s' % sorted(fcurve_paths),
+          any('"ArmR"' in p for p in fcurve_paths)
+          and not any('"ArmL"' in p for p in fcurve_paths))
+
+    moved_con_bone = arm.pose.bones['ArmL']   # 原 ArmR 骨(挂了约束), 现名 ArmL
+    check('引擎联动: 自引用约束 subtarget 随骨骼改名',
+          moved_con_bone.constraints[0].subtarget == 'ArmR')
+
+    # --- 目标名冲突: 两个原名指向同一个新名 → 自动去重且被报告, 不静默覆盖 ---
+    reset_blend()
+    arm2 = build_armature('SkelSrc2', SKEL_BONES)
+    report2 = skel.apply_rename(arm2, [('ArmL', 'X'), ('ArmR', 'X')])
+    check('重命名: 目标名冲突被检测且未静默覆盖',
+          len(report2['collided']) == 1
+          and report2['collided'][0][0] == 'ArmR'
+          and report2['collided'][0][2] != 'X')
+
+    # --- 重命名预设 JSON 往返 (display_name 自定义显示, 与映射预设目录隔离) ---
+    spec = {'format': skel.RENAME_FORMAT, 'version': skel.RENAME_VERSION,
+            'display_name': 'EndField_Si → Ruri', 'source_armature': 'EndField_Si',
+            'renames': [{'from': 'J_Bip_C_Hips', 'to': 'Hips'}]}
+    p1 = skel.save_rename_preset('_selftest_skel_rename', spec)
+    check('重命名预设保存落盘', os.path.isfile(p1))
+    check('重命名预设列表可见',
+          '_selftest_skel_rename' in skel.list_rename_presets())
+    loaded = skel.load_rename_preset('_selftest_skel_rename')
+    check('重命名预设 display_name 往返',
+          loaded['display_name'] == 'EndField_Si → Ruri')
+    check('重命名预设目录与映射预设目录互不干扰',
+          '_selftest_skel_rename' not in presets_mod.list_presets())
+    skel.delete_rename_preset('_selftest_skel_rename')
+    check('重命名预设删除', not os.path.isfile(p1))
+
+    # --- 操作符集成 ---
+    reset_blend()
+    try:
+        addon.register()
+    except ValueError:
+        pass    # 已注册
+    arm3 = build_armature('SkelSrc3', SKEL_BONES)
+    arm4 = build_armature('SkelSrc4', SKEL_BONES, location=(2, 0, 0))
+    for o in bpy.context.selected_objects:
+        o.select_set(False)
+
+    # 同时选中两个骨架 → 一次导出两份 (AI 对比命名的入口)
+    arm3.select_set(True)
+    arm4.select_set(True)
+    bpy.context.view_layer.objects.active = arm3
+    check('选中两个骨架时导出目标是两个',
+          {o.name for o in skel.selected_armatures(bpy.context)}
+          == {'SkelSrc3', 'SkelSrc4'})
+    r = bpy.ops.animret.skeleton_export_structure()
+    check('操作符: 导出骨架结构 FINISHED', r == {'FINISHED'})
+    check('操作符: 两个骨架各落一份 json',
+          os.path.isfile(skel.skeleton_export_path('SkelSrc3'))
+          and os.path.isfile(skel.skeleton_export_path('SkelSrc4')))
+
+    # 应用重命名只作用于活动骨架 (arm3), 另一个不受影响
+    s = bpy.context.scene.animret_skel
+    s.from_spec({'renames': [{'from': 'Root', 'to': 'Pelvis'},
+                             {'from': 'Spine', 'to': 'Chest'}]})
+    pairs = [(p.old_name, p.new_name) for p in s.pairs]
+    check('方向判定: 正向可用 反向不可用',
+          skel.count_directions(arm3, pairs) == (2, 0))
+    r = bpy.ops.animret.skeleton_rename_apply(reverse=False)
+    check('操作符: 正向转换 FINISHED', r == {'FINISHED'})
+    check('操作符: 骨骼确实改名',
+          'Pelvis' in arm3.data.bones and 'Chest' in arm3.data.bones)
+    check('操作符: 只改活动骨架, 另一个选中骨架不受影响',
+          'Root' in arm4.data.bones and 'Pelvis' not in arm4.data.bones)
+
+    # 双向: 反向把名字改回去
+    check('方向判定: 转换后变成只能反向',
+          skel.count_directions(arm3, pairs) == (0, 2))
+    r = bpy.ops.animret.skeleton_rename_apply(reverse=True)
+    check('操作符: 反向还原 FINISHED', r == {'FINISHED'})
+    check('操作符: 还原回原名',
+          'Root' in arm3.data.bones and 'Spine' in arm3.data.bones
+          and 'Pelvis' not in arm3.data.bones)
+    check('还原后方向判定回到正向', skel.count_directions(arm3, pairs) == (2, 0))
+
+    # 配置浏览器: 磁盘上的配置直接列出来
+    skel.save_rename_preset('_selftest_browse', {
+        'format': skel.RENAME_FORMAT, 'version': skel.RENAME_VERSION,
+        'display_name': '浏览器测试', 'source_armature': '',
+        'renames': [{'from': 'ArmL', 'to': 'Arm_L'},
+                    {'from': 'ArmR', 'to': 'Arm_R'}]})
+    r = bpy.ops.animret.skeleton_refresh_entries()
+    check('操作符: 刷新配置列表 FINISHED', r == {'FINISHED'})
+    names = [e.name for e in s.entries]
+    check('配置浏览器列出磁盘上的配置', '_selftest_browse' in names)
+    s.active_entry = names.index('_selftest_browse')   # 点一行 = 加载
+    check('点选配置即加载并展开',
+          len(s.pairs) == 2 and s.pairs[0].new_name == 'Arm_L'
+          and s.display_name == '浏览器测试')
+    # 骨骼搜索过滤
+    s.from_spec({'renames': [{'from': 'Bip001_L_Thigh', 'to': 'Thigh_L'},
+                             {'from': 'Bip001_R_Thigh', 'to': 'Thigh_R'},
+                             {'from': 'L_hairE_01_jnt', 'to': 'HairE_01_Jnt_L'},
+                             {'from': 'eyeLf01Joint', 'to': 'Eye01Joint_L'}]})
+    def nhit(q):
+        return sum(1 for p in s.pairs if skel.pair_matches(p, q))
+    check('搜索: 空 = 全部显示', nhit('') == 4)
+    check('搜索: 命中新名一侧 (thigh -> 2)', nhit('thigh') == 2)
+    check('搜索: 命中旧名一侧 (hairE -> 1)', nhit('hairE') == 1)
+    check('搜索: 大小写不敏感', nhit('THIGH') == 2)
+    check('搜索: 多词需全部命中 (thigh l -> 1)', nhit('thigh l') == 1)
+    check('搜索: 无命中', nhit('zzzz') == 0)
+    s.pair_filter = 'thigh'
+    r = bpy.ops.animret.skeleton_clear_filter()
+    check('操作符: 清空搜索', r == {'FINISHED'} and s.pair_filter == '')
+
+    skel.delete_rename_preset('_selftest_browse')
+    addon.unregister()
+
+
+# ---------------------------------------------------------------------------
 
 def main():
     print('Blender %s | Python %s' % (bpy.app.version_string,
                                       sys.version.split()[0]))
     for phase in (phase_fk, phase_equivalence, phase_bake,
                   phase_empty_fcurves, phase_presets,
-                  phase_operators, phase_cli):
+                  phase_operators, phase_skeleton_rename, phase_cli):
         try:
             phase()
         except Exception:

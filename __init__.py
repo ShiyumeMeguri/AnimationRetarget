@@ -30,10 +30,14 @@ from . import retarget_math
 from . import core
 from . import state
 from . import presets
+from . import skeleton_rename
 from . import ops
+from . import ops_skeleton_rename
 from . import ui
+from . import ui_skeleton_rename
 
-modules = (state, ops, ui)
+modules = (state, skeleton_rename, ops, ops_skeleton_rename, ui,
+           ui_skeleton_rename)
 
 
 def register():
@@ -49,6 +53,8 @@ def register():
         poll=lambda self, obj: obj.type == 'ARMATURE')
     bpy.types.Armature.animret = bpy.props.PointerProperty(
         type=state.AnimRetState, override={'LIBRARY_OVERRIDABLE'})
+    bpy.types.Scene.animret_skel = bpy.props.PointerProperty(
+        type=skeleton_rename.AnimRetSkeletonToolState)
     core.register_handlers()
 
 
@@ -60,3 +66,4 @@ def unregister():
             bpy.utils.unregister_class(cls)
     del bpy.types.Scene.animret_dest
     del bpy.types.Armature.animret
+    del bpy.types.Scene.animret_skel

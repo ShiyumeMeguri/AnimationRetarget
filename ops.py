@@ -143,6 +143,15 @@ class ANIMRET_OT_push_nla(_StateOperator, bpy.types.Operator):
 # 列表与映射工具
 # ---------------------------------------------------------------------------
 
+class ANIMRET_OT_clear_mapping_filter(_StateOperator, bpy.types.Operator):
+    bl_idname = 'animret.clear_mapping_filter'
+    bl_label = '清空搜索'
+
+    def execute(self, context):
+        get_state(context).mapping_filter = ''
+        return {'FINISHED'}
+
+
 class ANIMRET_OT_select_edit_type(_StateOperator, bpy.types.Operator):
     bl_idname = 'animret.select_edit_type'
     bl_label = ''
@@ -535,15 +544,18 @@ class ANIMRET_OT_preset_save_as(_StateOperator, bpy.types.Operator):
 class ANIMRET_OT_preset_load(_StateOperator, bpy.types.Operator):
     bl_idname = 'animret.preset_load'
     bl_label = '加载预设'
-    bl_description = '加载预设到当前目标骨架'
+    bl_description = ('加载预设到当前目标骨架\n'
+                      '骨架改名表也能直接当映射用 (两种配置通用)')
     bl_options = {'UNDO'}
 
     name: bpy.props.StringProperty()
+    subdir: bpy.props.StringProperty(default=presets.PRESET_SUBDIR)
 
     def execute(self, context):
         s = get_state(context)
         try:
-            spec = presets.load_preset(self.name)
+            spec = presets.load_preset(self.name,
+                                       self.subdir or presets.PRESET_SUBDIR)
         except Exception as e:
             self.report({'ERROR'}, '加载失败: %s' % e)
             return {'CANCELLED'}
@@ -633,6 +645,7 @@ classes = (
     ANIMRET_OT_bake,
     ANIMRET_OT_bake_all,
     ANIMRET_OT_push_nla,
+    ANIMRET_OT_clear_mapping_filter,
     ANIMRET_OT_select_edit_type,
     ANIMRET_OT_select_action,
     ANIMRET_OT_list_action,

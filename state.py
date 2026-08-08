@@ -19,6 +19,7 @@
 
 import bpy
 from . import core
+from . import presets
 
 
 def _armature_from_mesh(mesh_obj):
@@ -80,6 +81,14 @@ def _refresh_preview(state):
 
 def _on_mapping_edit(self, context):
     _refresh_preview(get_state(context))
+
+
+def mapping_matches(mapping, query):
+    """空格分隔的多个词全部命中(自身骨或来源骨任一侧)才算匹配。"""
+    if not query:
+        return True
+    hay = (mapping.dest + ' ' + mapping.source).lower()
+    return all(w in hay for w in query.lower().split())
 
 
 class AnimRetMapping(bpy.types.PropertyGroup):
@@ -249,6 +258,11 @@ class AnimRetState(bpy.types.PropertyGroup):
     editing_type: bpy.props.IntProperty(
         description='列表编辑页: 0映射 1旋转 2位移 3IK',
         override={'LIBRARY_OVERRIDABLE'})
+    mapping_filter: bpy.props.StringProperty(
+        name='搜索', default='', options={'TEXTEDIT_UPDATE'},
+        description='按骨骼名过滤映射表 (自身骨/来源骨任一命中即显示); '
+                    '空格分隔多个词 = 全部命中才显示',
+        override={'LIBRARY_OVERRIDABLE'})
     preview: bpy.props.BoolProperty(
         name='预览', default=False,
         description='实时预览重定向效果 (纯计算, 不创建约束, 关闭即完全复原)',
@@ -391,9 +405,10 @@ class AnimRetState(bpy.types.PropertyGroup):
     def from_spec(self, spec, context=None):
         self.mappings.clear()
         self.selected_count = 0
-        for md in spec.get('mappings', []):
+        # 映射表与骨架改名表通用: 改名表的 from/to 就是这里的 source/dest
+        for src, dst, extra in presets.normalize_pairs(spec):
             m = self.mappings.add()
-            m.from_spec(md)
+            m.from_spec(dict(extra, source=src, dest=dst))
         self.active_mapping = 0 if len(self.mappings) else -1
         settings = spec.get('settings', {})
         if 'frame_step' in settings:
