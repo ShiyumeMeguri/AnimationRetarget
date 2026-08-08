@@ -7,6 +7,7 @@
 # 用 Blender depsgraph 求值结果作为 ground truth, 对抗性验证纯数学内核:
 #   1. FK 忠实度 (connected / inherit_rotation / inherit_scale / euler / scale)
 #   2. 与旧版约束 (COPY_ROTATION + COPY_LOCATION) 的数值等价
+#   2.5 手动偏移的层级性 (转父骨带动整条子链) 与对齐姿态捕捉的等价性
 #   3. 自重定向恒等性 (相同骨架 → 输出 == 输入)
 #   4. IK 可达性与朝向保持
 #   5. 批量烘焙确定性 + 顺序无关性 (漂移在结构上不存在的证明)
@@ -425,6 +426,108 @@ def phase_equivalence():
             (dst.matrix_world @ pose[dest_skel.index['Hand']]).decompose()[1]))
     check('IK 可达帧全部贴合 (失败帧=%d)' % reach_fail, reach_fail == 0)
     check('IK 后手部朝向保持 %.2e' % orient_err, orient_err < 1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: 手动偏移的层级性
+#   偏移是"参考姿态"的一部分, 转大腿必须带动小腿与扭曲骨整条子链 —
+#   否则子骨各自把世界朝向钉死, 只有骨头被拖着平移 (腿在膝盖处断开,
+#   扛大腿蒙皮权重的扭曲骨纹丝不动, 看着像大腿没权重)。
+# ---------------------------------------------------------------------------
+
+LEG_SRC = [
+    # name         head              tail                roll  parent    con    inhR  inhS
+    ('Pelvis',     (0, 0, 1.00),     (0, 0.10, 1.02),    0.00, None,     False, True, 'FULL'),
+    ('Thigh',      (0.10, 0, 0.95),  (0.10, 0, 0.52),    0.20, 'Pelvis', False, True, 'FULL'),
+    ('ThighTwist', (0.10, 0, 0.80),  (0.10, 0, 0.62),    0.20, 'Thigh',  False, True, 'FULL'),
+    ('Calf',       (0.10, 0, 0.52),  (0.10, 0, 0.10),   -0.10, 'Thigh',  False, True, 'FULL'),
+    ('AnkleS',     (0.10, 0, 0.10),  (0.10, 0.15, 0.05), 0.00, 'Calf',   False, True, 'FULL'),
+]
+
+# 目标侧照搬用户真实骨架的形状: 小腿 connected, 扭曲骨是大腿的形变子骨
+LEG_DST = [
+    ('Root',           (0, 0, 0.00),     (0, 0.10, 0.00),    0.00, None,       False, True, 'FULL'),
+    ('UpperLeg',       (0.09, 0, 0.90),  (0.09, 0, 0.48),    0.35, 'Root',     False, True, 'FULL'),
+    ('UpperLegTwists', (0.09, 0, 0.75),  (0.09, 0, 0.58),    0.35, 'UpperLeg', False, True, 'FULL'),
+    ('LowerLeg',       (0.09, 0, 0.48),  (0.09, 0, 0.06),   -0.20, 'UpperLeg', True,  True, 'FULL'),
+    ('Ankle',          (0.09, 0, 0.06),  (0.09, 0.14, 0.02), 0.00, 'LowerLeg', True,  True, 'FULL'),
+]
+
+LEG_PAIRS = [('Thigh', 'UpperLeg'), ('ThighTwist', 'UpperLegTwists'),
+             ('Calf', 'LowerLeg'), ('AnkleS', 'Ankle')]
+
+
+def leg_spec(offset=(0.0, 0.0, 0.0), aligns=None):
+    """偏移只挂在 UpperLeg 上 — 子链是否跟着转就是被测行为。"""
+    return [{'source': s, 'dest': d,
+             'rot': {'auto': True, 'ortho': False,
+                     'offset': list(offset) if d == 'UpperLeg' else [0, 0, 0],
+                     'align': (list(aligns[d]) if aligns else None)}}
+            for s, d in LEG_PAIRS]
+
+
+def leg_solve(src, dst, spec_maps):
+    """源骨架保持 rest → 解出的目标姿态就是参考姿态本身。"""
+    src_skel = core.snapshot_skeleton(src)
+    dest_skel = core.snapshot_skeleton(dst)
+    mappings, warns = rm.build_mappings(src_skel, dest_skel, spec_maps)
+    src_pose = rm.fk_pose(src_skel, {})
+    world = {b.name: src_skel.matrix_world @ src_pose[i]
+             for i, b in enumerate(src_skel.bones)}
+    bases = rm.solve_frame(dest_skel, mappings, world)
+    basis_map = {dest_skel.index[n]: b for n, b in bases.items()}
+    pose = rm.fk_pose(dest_skel, basis_map)
+    out = {}
+    for i, b in enumerate(dest_skel.bones):
+        loc, rot, _sca = (dest_skel.matrix_world @ pose[i]).decompose()
+        out[b.name] = (rot, loc)
+    return out, mappings, warns
+
+
+def phase_manual_offset():
+    print('\n== Phase 2.5: 手动偏移的层级性 ==')
+    reset_blend()
+    src = build_armature('LegSrc', LEG_SRC, location=(0.2, 0, 0))
+    dst = build_armature('LegDst', LEG_DST, rotation=(0, 0, math.radians(20)))
+
+    base, _maps, warns = leg_solve(src, dst, leg_spec())
+    check('腿部映射无警告', not warns, str(warns))
+
+    ang = math.radians(25)
+    for label, off in (('摆 X', (ang, 0, 0)), ('扭 Y', (0, ang, 0)),
+                       ('侧 Z', (0, 0, ang))):
+        cur, _m, _w = leg_solve(src, dst, leg_spec(off))
+        err = max(abs(quat_angle(base[n][0], cur[n][0]) - ang)
+                  for n in ('UpperLeg', 'UpperLegTwists', 'LowerLeg', 'Ankle'))
+        check('偏移%s: 整条子链同步转 25° (最大偏差 %.2e rad)' % (label, err),
+              err < 1e-4)
+
+    # 与"捕捉对齐姿态"严格等价 — 真值取自 Blender 自身的姿态求值
+    pb = dst.pose.bones['UpperLeg']
+    pb.rotation_mode = 'QUATERNION'
+    pb.rotation_quaternion = Quaternion((1, 0, 0), ang)
+    bpy.context.view_layer.update()
+    aligns = {d: (dst.matrix_world @ dst.pose.bones[d].matrix).decompose()[1]
+              for _s, d in LEG_PAIRS}
+    pb.rotation_quaternion = (1, 0, 0, 0)
+    bpy.context.view_layer.update()
+
+    src_skel = core.snapshot_skeleton(src)
+    dest_skel = core.snapshot_skeleton(dst)
+    maps_align, _ = rm.build_mappings(src_skel, dest_skel,
+                                      leg_spec(aligns=aligns))
+    maps_off, _ = rm.build_mappings(src_skel, dest_skel,
+                                    leg_spec(offset=(ang, 0, 0)))
+    max_d = max(quat_angle(a.q_offset, b.q_offset)
+                for a, b in zip(maps_align, maps_off))
+    check('手动偏移 ≡ 摆好姿势后捕捉对齐 (差 %.2e rad)' % max_d, max_d < 1e-4)
+
+    # 空态零成本: 没有偏移时参考姿态求值不介入, 旋转解逐位就是纯 rest 差
+    plain, _ = rm.build_mappings(src_skel, dest_skel, leg_spec())
+    check('零偏移时旋转解逐位等于纯 rest 差 (无参考姿态噪声)',
+          all(m.q_offset == (src_skel.rest_world_rot(m.src_i).inverted()
+                             @ dest_skel.rest_world_rot(m.dest_i)).normalized()
+              for m in plain))
 
 
 # ---------------------------------------------------------------------------
@@ -975,8 +1078,8 @@ def phase_skeleton_rename():
 def main():
     print('Blender %s | Python %s' % (bpy.app.version_string,
                                       sys.version.split()[0]))
-    for phase in (phase_fk, phase_equivalence, phase_bake,
-                  phase_empty_fcurves, phase_presets,
+    for phase in (phase_fk, phase_equivalence, phase_manual_offset,
+                  phase_bake, phase_empty_fcurves, phase_presets,
                   phase_operators, phase_skeleton_rename, phase_cli):
         try:
             phase()

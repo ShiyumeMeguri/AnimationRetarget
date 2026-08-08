@@ -112,7 +112,9 @@ class AnimRetMapping(bpy.types.PropertyGroup):
         override={'LIBRARY_OVERRIDABLE'}, update=_on_mapping_edit)
     rot_offset: bpy.props.FloatVectorProperty(
         name='手动偏移', subtype='EULER', size=3, default=(0.0, 0.0, 0.0),
-        description='在自动偏移基础上追加的手动旋转修正 (来源骨局部空间后乘)',
+        description='在自动偏移基础上追加的手动旋转修正\n'
+                    '等同于在姿态模式里绕该骨自身轴向转动它: 整条子链跟着转\n'
+                    '与"捕捉对齐姿态"同一语义 (都在描述目标骨架的参考姿态)',
         override={'LIBRARY_OVERRIDABLE'}, update=_on_mapping_edit)
     align_set: bpy.props.BoolProperty(
         default=False, override={'LIBRARY_OVERRIDABLE'},

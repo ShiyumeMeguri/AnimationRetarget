@@ -13,9 +13,11 @@
 
 ## 算法 (只取顶级)
 
-- **旋转**: `R_dest_world(t) = R_src_world(t) @ Q`, `Q = rot(src_rest_w)⁻¹ @ rot(dest_ref_w) @ R_manual`。
+- **旋转**: `R_dest_world(t) = R_src_world(t) @ Q`, `Q = rot(src_rest_w)⁻¹ @ rot(dest_ref_w)`。
   统一了"世界旋转复制+精确偏移"(kumopult) 与 "rest-delta 相似变换"(Mwni) —— 二者数学等价。
-  `dest_ref` 默认取 rest, 可"捕捉对齐姿态"支持 A-pose ↔ T-pose。
+  `dest_ref` = 目标骨在**参考姿态**下的朝向 = rest / "捕捉对齐姿态" + 手动偏移。
+  手动偏移在目标骨架上按层级 FK 求值: 转大腿会带动小腿、扭曲骨整条子链,
+  与捕捉对齐姿态严格等价 (自检里以 Blender 自身 FK 为真值断言), 支持 A-pose ↔ T-pose。
 - **位移**: 世界空间传递 + 轴掩码 + 髋高比自动缩放 (体型不同的根运动)。
 - **IK**: 解析双骨 IK (保持弯曲平面) / 单关节瞄准 / 阻尼 CCD, `链长` 与旧版约束 chain_count 同义。
 - **FK 求值**: 逐行移植 Blender 内核 `BKE_bone_parent_transform_calc_from_matrices`

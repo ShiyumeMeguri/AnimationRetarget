@@ -26,10 +26,12 @@ BKE_bone_parent_transform_calc_from_matrices / _apply (armature.cc),
 二者数学上等价):
 
     R_dest_world(t) = R_src_world(t) @ Q
-    Q = rot(src_rest_world)⁻¹ @ rot(dest_ref_world) @ R_manual
+    Q = rot(src_rest_world)⁻¹ @ rot(dest_ref_world)
 
-其中 dest_ref_world 默认取目标骨骼自身 rest 朝向; 若用户捕捉了"对齐姿态"
-(让目标骨架摆出与源骨架 rest 相同的姿势), 则取对齐姿态下的世界朝向,
+其中 dest_ref_world = 目标骨骼在"参考姿态"下的世界朝向 —— 参考姿态描述的是
+"源骨架处于 rest 时目标骨架该摆成什么样": 默认即自身 rest; 用户捕捉了"对齐姿态"
+(让目标骨架摆出与源骨架 rest 相同的姿势) 则取该姿态下的朝向; 手动偏移再叠加其上。
+手动偏移与对齐捕捉同语义, 都在目标骨架上按层级 FK 求值 —— 转父骨会带动整条子链。
 以此支持 A-pose ↔ T-pose 等不同 rest 约定之间的迁移。
 
 位移传递 (根骨骼/武器):
@@ -395,6 +397,53 @@ def _ortho_snap(q):
     return e.to_quaternion()
 
 
+def _manual_offset(rot_spec):
+    """映射 rot 字典里的手动偏移 → 四元数; 全零返回 None。"""
+    offset = rot_spec.get('offset')
+    if not offset or not any(abs(v) > 1e-9 for v in offset):
+        return None
+    return Euler(offset, 'XYZ').to_quaternion()
+
+
+def _reference_corrections(dest_skel, rot_by_dest):
+    """手动偏移在目标骨架上按层级 FK 求值 → {骨索引: 相对自身参考朝向的修正}。
+
+    偏移因此等价于"在姿态模式里绕自身轴向转这根骨": 整条子链跟着转 —— 与
+    "捕捉对齐姿态"同一语义 (对齐捕捉的本就是一个真实姿态, 天然带层级)。
+    没有任何手动偏移时返回空表, 参考朝向逐位仍是 rest / 对齐捕捉值。
+    """
+    aligns, offsets = {}, {}
+    for di, rot_spec in rot_by_dest.items():
+        align = rot_spec.get('align')
+        if align:
+            aligns[di] = Quaternion(align).normalized()
+        q = _manual_offset(rot_spec)
+        if q is not None:
+            offsets[di] = q
+    if not offsets:
+        return {}
+
+    # 对齐姿态先还原成各骨的 basis, 手动偏移再按骨骼自身轴向后乘上去
+    _pose, bases = _apply_targets(dest_skel, aligns, {})
+    for i, q in offsets.items():
+        local = q.to_matrix().to_4x4()
+        base = bases.get(i)
+        bases[i] = base @ local if base is not None else local
+    pose = fk_pose(dest_skel, bases)
+
+    out = {}
+    for di in rot_by_dest:
+        i = di
+        while i >= 0 and i not in offsets:
+            i = dest_skel.bones[i].parent
+        if i < 0:          # 自身与全部祖先都没偏移 → 参考朝向原样不动
+            continue
+        ref = aligns[di] if di in aligns else dest_skel.rest_world_rot(di)
+        posed = dest_skel.world_rot @ rot_of(pose[di])
+        out[di] = (ref.inverted() @ posed).normalized()
+    return out
+
+
 def build_mappings(src_skel, dest_skel, mapping_dicts):
     """把 preset/state 的映射字典编译为 SolvedMapping 列表。
 
@@ -406,6 +455,7 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
     返回 (mappings, warnings)。无效映射跳过并记录警告。
     """
     out, warnings = [], []
+    entries = []
     for md in mapping_dicts:
         sname, dname = md.get('source', ''), md.get('dest', '')
         if not sname or not dname:
@@ -415,6 +465,13 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
         if si is None or di is None:
             warnings.append('跳过映射 %s -> %s: 骨骼不存在' % (sname, dname))
             continue
+        entries.append((md, sname, dname, si, di))
+
+    # 手动偏移必须先在目标骨架上整体求值一次, 才能带动各自的子链
+    corrections = _reference_corrections(
+        dest_skel, {di: md.get('rot', {}) for md, _s, _d, _si, di in entries})
+
+    for md, sname, dname, si, di in entries:
         m = SolvedMapping()
         m.src_name, m.dest_name, m.src_i, m.dest_i = sname, dname, si, di
 
@@ -430,9 +487,9 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
             q = src_rest.inverted() @ dest_ref
             if rot.get('ortho', False):
                 q = _ortho_snap(q)
-        offset = rot.get('offset')
-        if offset and any(abs(v) > 1e-9 for v in offset):
-            q = q @ Euler(offset, 'XYZ').to_quaternion()
+        correction = corrections.get(di)
+        if correction is not None:
+            q = q @ correction
         m.q_offset = q.normalized()
 
         loc = md.get('loc', {})
