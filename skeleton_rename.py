@@ -20,19 +20,26 @@
      (old→new 表 + 自定义 display_name), 存进 <SkeletonRename>/。
   3. Blender 里从预设菜单按 display_name 选中该预设, "应用重命名" 一键
      把骨骼改名。
+  4. 同一份对照表还能直接拿去转换动作: 把当前 blend 文件里的动作收进面板,
+     按表改写动作内部的骨骼引用 (FCurve 路径 + 通道组名), 同样支持互转。
 
-重命名只需要管好骨骼名本身的冲突: Blender 的 Bone.name setter 本来就会把
+骨架改名只需要管好骨骼名本身的冲突: Blender 的 Bone.name setter 本来就会把
 顶点组名 / FCurve 路径 / 同骨架内约束 subtarget 一并改掉 (逐条 RNA 属性
 赋值触发, 不是只有菜单里的重命名操作符才有 —— 已实测确认), 蒙皮和已有
 动画不会因改名而失效, 不需要 (也不应该) 在这之上再手搓一遍同步: 手搓版本
 只会用改名前的旧表把引擎刚修好的引用改错, 互换名场景尤其致命。
+
+引擎的联动只覆盖"挂在某个对象动画数据上"的动作。从游戏/FBX 导进来堆在文件里
+的那一大批动作没有任何使用者, 引擎不会替它们改路径 —— 那批就是第 4 步的活。
 """
 
 import json
 import os
+import re
 
 import bpy
 
+from . import core
 from . import presets
 from .state import resolve_dest_object
 
@@ -219,6 +226,67 @@ def apply_rename(obj, pairs):
 
 
 # ---------------------------------------------------------------------------
+# 动画转换: 同一份对照表改写动作内部的骨骼引用
+# ---------------------------------------------------------------------------
+
+_BONE_REF_RE = re.compile(r'pose\.bones\["((?:[^"\\]|\\.)*)"\]')
+
+
+def _rewrite_path(data_path, name_map):
+    """把路径里 pose.bones["旧名"] 的那一段换成新名 (转义交给引擎处理)。"""
+    def one(m):
+        old = bpy.utils.unescape_identifier(m.group(1))
+        new = name_map.get(old)
+        if new is None:
+            return m.group(0)
+        return 'pose.bones["%s"]' % bpy.utils.escape_identifier(new)
+    return _BONE_REF_RE.sub(one, data_path)
+
+
+def action_bone_names(action):
+    """动作里引用过的全部骨骼名 (从 FCurve 路径解析, 含自定义属性/约束路径)。"""
+    out = set()
+    for fc in core.iter_action_fcurves(action):
+        for m in _BONE_REF_RE.finditer(fc.data_path):
+            out.add(bpy.utils.unescape_identifier(m.group(1)))
+    return out
+
+
+def rename_action(action, name_map):
+    """按 name_map 改写一个动作里的骨骼引用。
+
+    路径是纯字符串、单趟查表替换, 互换名天然安全 (不像骨骼名那样共用命名空间);
+    通道组名共用命名空间, 所以走和骨骼一样的两阶段临时名。
+    返回 (改写的曲线数, 改名的通道组数, 改完后重名的 (路径, 分量) 列表)。
+    """
+    finals = [(fc, _rewrite_path(fc.data_path, name_map))
+              for fc in core.iter_action_fcurves(action)]
+
+    # 撞车判据看的是改完之后的终态, 不受遍历顺序影响
+    seen, collided = set(), []
+    for fc, path in finals:
+        key = (path, fc.array_index)
+        if key in seen:
+            collided.append(key)
+        seen.add(key)
+
+    curves = 0
+    for fc, path in finals:
+        if path != fc.data_path:
+            fc.data_path = path
+            curves += 1
+
+    jobs = [(g, name_map[g.name]) for g in core.iter_action_groups(action)
+            if g.name in name_map]
+    for i, (g, _new) in enumerate(jobs):
+        g.name = '.animret.tmp.%d' % i
+    for g, new in jobs:
+        g.name = new
+
+    return curves, len(jobs), collided
+
+
+# ---------------------------------------------------------------------------
 # 会话态: 与映射状态 (state.AnimRetState) 完全独立
 # ---------------------------------------------------------------------------
 
@@ -237,9 +305,25 @@ class AnimRetPresetEntry(bpy.types.PropertyGroup):
     label: bpy.props.StringProperty()     # display_name, 没有就用文件名
 
 
-def count_directions(obj, pairs):
-    """(正向可改名数, 反向可改名数) —— 看骨架现在是哪一侧的命名, 决定能往哪转。"""
-    names = {b.name for b in obj.data.bones} if obj else set()
+class AnimRetActionEntry(bpy.types.PropertyGroup):
+    """动作列表里的一行 (当前 blend 文件里的一个 Action)。"""
+    name: bpy.props.StringProperty()
+    selected: bpy.props.BoolProperty(
+        default=True, description='勾选的动作才参与转换')
+    bone_count: bpy.props.IntProperty(description='该动作引用的骨骼数')
+    forward: bpy.props.IntProperty(description='正向可转换的骨名数')
+    backward: bpy.props.IntProperty(description='反向可还原的骨名数')
+
+
+def armature_bone_names(obj):
+    return {b.name for b in obj.data.bones} if obj else set()
+
+
+def count_directions(names, pairs):
+    """(正向可改名数, 反向可改名数) —— 看现在用的是哪一侧的命名, 决定能往哪转。
+
+    骨架和动作共用这一个判据: names 是骨架的骨名集或动作引用到的骨名集。
+    """
     fwd = sum(1 for o, n in pairs if o in names and o != n)
     rev = sum(1 for o, n in pairs if n in names and o != n)
     return fwd, rev
@@ -256,6 +340,7 @@ def _on_browse_select(self, context):
         return
     self.from_spec(spec)
     self.active_preset = e.name
+    refresh_action_counts(self)   # 换了配置, 动作能往哪转也跟着变
 
 
 class AnimRetSkeletonToolState(bpy.types.PropertyGroup):
@@ -269,6 +354,12 @@ class AnimRetSkeletonToolState(bpy.types.PropertyGroup):
         name='搜索', default='', options={'TEXTEDIT_UPDATE'},
         description='按骨骼名过滤对照表 (原名/新名任一命中即显示); '
                     '空格分隔多个词 = 全部命中才显示')
+
+    actions: bpy.props.CollectionProperty(type=AnimRetActionEntry)
+    active_action: bpy.props.IntProperty(default=-1)
+    action_filter: bpy.props.StringProperty(
+        name='搜索', default='', options={'TEXTEDIT_UPDATE'},
+        description='按动作名过滤列表; 空格分隔多个词 = 全部命中才显示')
 
     pairs: bpy.props.CollectionProperty(
         type=AnimRetRenamePair,
@@ -309,6 +400,40 @@ def pair_matches(pair, query):
     return all(w in hay for w in query.lower().split())
 
 
+def action_matches(entry, query):
+    if not query:
+        return True
+    hay = entry.name.lower()
+    return all(w in hay for w in query.lower().split())
+
+
+def refresh_actions(state):
+    """把当前 blend 文件里的动作全部收进面板列表 (保留已有勾选)。"""
+    chosen = {e.name: e.selected for e in state.actions}
+    state.actions.clear()
+    for act in sorted(bpy.data.actions, key=lambda a: a.name):
+        e = state.actions.add()
+        e.name = act.name
+        e.selected = chosen.get(act.name, True)
+    state.active_action = 0 if len(state.actions) else -1
+    refresh_action_counts(state)
+    return len(state.actions)
+
+
+def refresh_action_counts(state):
+    """按当前配置重算每条动作引用了哪些骨骼、能往哪个方向转。"""
+    pairs = [(p.old_name, p.new_name) for p in state.pairs]
+    for e in state.actions:
+        names = action_bone_names(bpy.data.actions.get(e.name))
+        e.bone_count = len(names)
+        e.forward, e.backward = count_directions(names, pairs)
+
+
+def selected_actions(state):
+    """勾选中的动作条目 (面板上的"将转换 N 条"就是这个)。"""
+    return [e for e in state.actions if e.selected]
+
+
 def refresh_entries(state):
     """重扫两个配置目录, 填进浏览器列表 (改名表与映射表通用, 一起列)。"""
     keep = state.active_preset
@@ -325,5 +450,6 @@ def refresh_entries(state):
 classes = (
     AnimRetRenamePair,
     AnimRetPresetEntry,
+    AnimRetActionEntry,
     AnimRetSkeletonToolState,
 )

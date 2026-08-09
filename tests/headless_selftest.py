@@ -1119,8 +1119,11 @@ def phase_skeleton_rename():
     s.from_spec({'renames': [{'from': 'Root', 'to': 'Pelvis'},
                              {'from': 'Spine', 'to': 'Chest'}]})
     pairs = [(p.old_name, p.new_name) for p in s.pairs]
-    check('方向判定: 正向可用 反向不可用',
-          skel.count_directions(arm3, pairs) == (2, 0))
+
+    def dirs(obj):
+        return skel.count_directions(skel.armature_bone_names(obj), pairs)
+
+    check('方向判定: 正向可用 反向不可用', dirs(arm3) == (2, 0))
     r = bpy.ops.animret.skeleton_rename_apply(reverse=False)
     check('操作符: 正向转换 FINISHED', r == {'FINISHED'})
     check('操作符: 骨骼确实改名',
@@ -1129,14 +1132,13 @@ def phase_skeleton_rename():
           'Root' in arm4.data.bones and 'Pelvis' not in arm4.data.bones)
 
     # 双向: 反向把名字改回去
-    check('方向判定: 转换后变成只能反向',
-          skel.count_directions(arm3, pairs) == (0, 2))
+    check('方向判定: 转换后变成只能反向', dirs(arm3) == (0, 2))
     r = bpy.ops.animret.skeleton_rename_apply(reverse=True)
     check('操作符: 反向还原 FINISHED', r == {'FINISHED'})
     check('操作符: 还原回原名',
           'Root' in arm3.data.bones and 'Spine' in arm3.data.bones
           and 'Pelvis' not in arm3.data.bones)
-    check('还原后方向判定回到正向', skel.count_directions(arm3, pairs) == (2, 0))
+    check('还原后方向判定回到正向', dirs(arm3) == (2, 0))
 
     # 配置浏览器: 磁盘上的配置直接列出来
     skel.save_rename_preset('_selftest_browse', {
@@ -1174,13 +1176,123 @@ def phase_skeleton_rename():
 
 
 # ---------------------------------------------------------------------------
+# Phase 7.5: 动画转换 — 同一份对照表改写动作内部的骨骼引用
+#   引擎只替"挂在对象动画数据上"的动作改路径; 导进来堆在文件里没有使用者的
+#   那一批它不管, 这一步管的就是那批。
+# ---------------------------------------------------------------------------
+
+def _paths_of(action):
+    return {(fc.data_path, fc.array_index)
+            for fc in core.iter_action_fcurves(action)}
+
+
+def _count_under(action, bone):
+    token = 'pose.bones["%s"]' % bone
+    return sum(1 for fc in core.iter_action_fcurves(action)
+               if fc.data_path.startswith(token))
+
+
+def phase_action_rename():
+    print('\n== Phase 7.5: 动画转换 (动作内部骨骼引用) ==')
+    reset_blend()
+    try:
+        addon.register()
+    except ValueError:
+        pass
+    skel = __import__(PKG + '.skeleton_rename', fromlist=['x'])
+
+    arm = build_armature('ActSrc', SKEL_BONES)
+    act = make_action(arm, 'GameAnim')
+    for bone in ('Root', 'Spine', 'ArmL', 'ArmR'):
+        key_bone(arm, bone, 1, quat=Quaternion((0, 0, 1), 0.3))
+        key_bone(arm, bone, 10, quat=Quaternion((0, 0, 1), -0.3))
+    arm.keyframe_insert('location', frame=1)     # 物体级通道: 不该被碰
+    writer = core._ActionWriter(act, arm.name)
+    writer.new_curve('pose.bones["ArmL"]["custom"]', 0, 'ArmL')
+    writer.new_curve('pose.bones["ArmL"].constraints["c"].influence', 0, 'ArmL')
+
+    # 摘掉指派 —— 模拟"导进来堆在文件里、没有使用者"的那一批动作
+    act.use_fake_user = True
+    arm.animation_data.action = None
+
+    before = _paths_of(act)
+    n_arm_l, n_arm_r = _count_under(act, 'ArmL'), _count_under(act, 'ArmR')
+    check('自定义属性/约束路径也算骨骼引用 (ArmL %d 条)' % n_arm_l, n_arm_l == 6)
+
+    pairs = [('Root', 'Pelvis'), ('Spine', 'Chest'),
+             ('ArmL', 'ArmR'), ('ArmR', 'ArmL')]
+    name_map = dict(pairs)
+    names0 = skel.action_bone_names(act)
+    check('解析出动作引用的骨骼名 %s' % sorted(names0),
+          names0 == {'Root', 'Spine', 'ArmL', 'ArmR'})
+    check('方向判定: 正向 4 / 反向 2',
+          skel.count_directions(names0, pairs) == (4, 2))
+
+    curves, groups, collided = skel.rename_action(act, name_map)
+    paths = {p for p, _i in _paths_of(act)}
+    check('骨骼引用已改写 (%d 条曲线)' % curves,
+          'pose.bones["Pelvis"].rotation_quaternion' in paths
+          and 'pose.bones["Chest"].rotation_quaternion' in paths
+          and not any('"Root"' in p or '"Spine"' in p for p in paths))
+    # 互换名若被改了两次就会原样退回去 —— 用两侧曲线条数是否对调来判
+    check('互换名 ArmL↔ArmR 只改一次 (%d ↔ %d)' % (n_arm_l, n_arm_r),
+          _count_under(act, 'ArmR') == n_arm_l
+          and _count_under(act, 'ArmL') == n_arm_r)
+    check('物体级通道未被波及', ('location', 0) in _paths_of(act))
+    check('改完无重名曲线', not collided)
+    gnames = {g.name for g in core.iter_action_groups(act)}
+    check('骨骼通道组改名、非骨骼组不动 %s (%d 个)' % (sorted(gnames), groups),
+          gnames == {'Pelvis', 'Chest', 'ArmL', 'ArmR', 'Object Transforms'})
+
+    skel.rename_action(act, {n: o for o, n in name_map.items()})
+    check('反向还原后与转换前逐条一致', _paths_of(act) == before)
+
+    # 操作符 + 面板列表
+    s = bpy.context.scene.animret_skel
+    s.from_spec({'renames': [{'from': o, 'to': n} for o, n in pairs]})
+    r = bpy.ops.animret.action_refresh()
+    check('操作符: 添加当前文件的动作 FINISHED', r == {'FINISHED'})
+    check('面板列出文件里的全部动作 (%d 条)' % len(s.actions),
+          len(s.actions) == len(bpy.data.actions))
+    e = next((x for x in s.actions if x.name == 'GameAnim'), None)
+    check('列表项带骨骼数与双向计数',
+          e is not None and e.bone_count == 4
+          and e.forward == 4 and e.backward == 2)
+
+    check('搜索: 命中动作名', skel.action_matches(e, 'game') is True)
+    check('搜索: 无命中', skel.action_matches(e, 'zzzz') is False)
+    s.action_filter = 'game'
+    r = bpy.ops.animret.action_clear_filter()
+    check('操作符: 清空动作搜索', r == {'FINISHED'} and s.action_filter == '')
+
+    bpy.ops.animret.action_select(action='NONE')
+    r = bpy.ops.animret.action_rename_apply(reverse=False)
+    check('一条都没勾选时拒绝执行', r == {'CANCELLED'}
+          and _paths_of(act) == before)
+
+    bpy.ops.animret.action_select(action='ALL')
+    r = bpy.ops.animret.action_rename_apply(reverse=False)
+    check('操作符: 正向转换 FINISHED', r == {'FINISHED'})
+    check('操作符转换后骨名已换掉',
+          any('"Pelvis"' in p for p, _i in _paths_of(act)))
+    e = next(x for x in s.actions if x.name == 'GameAnim')
+    check('转换后方向计数自动翻面', e.forward == 2 and e.backward == 4)
+    r = bpy.ops.animret.action_rename_apply(reverse=True)
+    check('操作符: 反向还原 FINISHED 且逐条复原',
+          r == {'FINISHED'} and _paths_of(act) == before)
+
+    addon.unregister()
+
+
+# ---------------------------------------------------------------------------
 
 def main():
     print('Blender %s | Python %s' % (bpy.app.version_string,
                                       sys.version.split()[0]))
     for phase in (phase_fk, phase_equivalence, phase_manual_offset,
                   phase_bake, phase_empty_fcurves, phase_presets,
-                  phase_operators, phase_skeleton_rename, phase_cli):
+                  phase_operators, phase_skeleton_rename,
+                  phase_action_rename, phase_cli):
         try:
             phase()
         except Exception:

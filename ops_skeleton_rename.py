@@ -133,8 +133,108 @@ class ANIMRETSK_OT_apply_rename(_ArmatureOperator, bpy.types.Operator):
         if report['missing']:
             self.report({'WARNING'}, '骨架上找不到 %d 个源名 (该方向可能已经应用过)'
                         % len(report['missing']))
+        skeleton_rename.refresh_action_counts(s)
         self.report({'INFO'}, '%s: 已重命名 %d 根骨骼'
                     % ('还原' if self.reverse else '转换', len(report['renamed'])))
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
+# 动画转换 (同一份对照表, 改写动作内部的骨骼引用)
+# ---------------------------------------------------------------------------
+
+class ANIMRETSK_OT_action_refresh(bpy.types.Operator):
+    bl_idname = 'animret.action_refresh'
+    bl_label = '添加当前文件的动作'
+    bl_description = ('把当前 blend 文件里的全部动作收进列表 (已有勾选保留)\n'
+                      '导入了新动作之后点一下重扫')
+
+    def execute(self, context):
+        s = context.scene.animret_skel
+        n = skeleton_rename.refresh_actions(s)
+        self.report({'INFO'}, '列出 %d 条动作' % n)
+        return {'FINISHED'}
+
+
+class ANIMRETSK_OT_action_select(bpy.types.Operator):
+    bl_idname = 'animret.action_select'
+    bl_label = '动作列表选择操作'
+    bl_description = '全选/弃选/反选 (只作用于当前搜索过滤后可见的动作)'
+
+    action: bpy.props.StringProperty()
+
+    def execute(self, context):
+        s = context.scene.animret_skel
+        for e in s.actions:
+            if not skeleton_rename.action_matches(e, s.action_filter):
+                continue
+            if self.action == 'ALL':
+                e.selected = True
+            elif self.action == 'NONE':
+                e.selected = False
+            else:
+                e.selected = not e.selected
+        return {'FINISHED'}
+
+
+class ANIMRETSK_OT_action_clear_filter(bpy.types.Operator):
+    bl_idname = 'animret.action_clear_filter'
+    bl_label = '清空搜索'
+
+    def execute(self, context):
+        context.scene.animret_skel.action_filter = ''
+        return {'FINISHED'}
+
+
+class ANIMRETSK_OT_action_rename_apply(bpy.types.Operator):
+    bl_idname = 'animret.action_rename_apply'
+    bl_label = '转换动作'
+    bl_description = ('用当前配置改写勾选动作内部的骨骼引用 (FCurve 路径 + 通道组名)\n'
+                      '正向 = 表里的 原名→新名; 反向 = 新名→原名, 用来还原\n'
+                      '专治导进来堆在文件里、没挂给任何对象的那批动作 —— '
+                      '骨架改名时引擎不会替它们改路径')
+    bl_options = {'UNDO'}
+
+    reverse: bpy.props.BoolProperty(
+        name='反向', default=False,
+        description='反着改回去 (新名 → 原名), 即还原')
+
+    def execute(self, context):
+        s = context.scene.animret_skel
+        name_map = {}
+        for p in s.pairs:
+            old, new = ((p.new_name, p.old_name) if self.reverse
+                        else (p.old_name, p.new_name))
+            if old and new and old != new:
+                name_map[old] = new
+        if not name_map:
+            self.report({'WARNING'}, '当前没有加载任何配置')
+            return {'CANCELLED'}
+
+        entries = skeleton_rename.selected_actions(s)
+        if not entries:
+            self.report({'WARNING'}, '一条动作都没勾选')
+            return {'CANCELLED'}
+
+        curves = groups = touched = 0
+        collided = 0
+        for e in entries:
+            act = bpy.data.actions.get(e.name)
+            if act is None:
+                continue
+            c, g, col = skeleton_rename.rename_action(act, name_map)
+            curves += c
+            groups += g
+            collided += len(col)
+            if c or g:
+                touched += 1
+        skeleton_rename.refresh_action_counts(s)
+        if collided:
+            self.report({'WARNING'}, '有 %d 条曲线改完后与已有曲线重名 '
+                                     '(该动作可能两套命名混着用)' % collided)
+        self.report({'INFO'}, '%s: %d/%d 条动作被改写 (%d 条曲线, %d 个通道组)'
+                    % ('还原' if self.reverse else '转换', touched,
+                       len(entries), curves, groups))
         return {'FINISHED'}
 
 
@@ -206,6 +306,7 @@ class ANIMRETSK_OT_preset_delete(bpy.types.Operator):
         s.active_preset = ''
         s.pairs.clear()
         skeleton_rename.refresh_entries(s)
+        skeleton_rename.refresh_action_counts(s)
         return {'FINISHED'}
 
 
@@ -216,6 +317,10 @@ classes = (
     ANIMRETSK_OT_refresh_entries,
     ANIMRETSK_OT_clear_filter,
     ANIMRETSK_OT_apply_rename,
+    ANIMRETSK_OT_action_refresh,
+    ANIMRETSK_OT_action_select,
+    ANIMRETSK_OT_action_clear_filter,
+    ANIMRETSK_OT_action_rename_apply,
     ANIMRETSK_OT_preset_save,
     ANIMRETSK_OT_preset_save_as,
     ANIMRETSK_OT_preset_delete,

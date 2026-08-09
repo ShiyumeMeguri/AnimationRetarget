@@ -68,6 +68,40 @@ class ANIMRETSK_UL_pairs(bpy.types.UIList):
         return flags, []
 
 
+class ANIMRETSK_UL_actions(bpy.types.UIList):
+    """当前文件里的动作: 勾选参与转换, 右侧显示它引用的骨名往哪边通。"""
+
+    def draw_item(self, context, layout, data, item, icon, active_data,
+                  active_propname, index, flt_flag):
+        row = layout.row(align=True)
+        row.prop(item, 'selected', text='', emboss=False,
+                 icon='CHECKBOX_HLT' if item.selected else 'CHECKBOX_DEHLT')
+        name = row.row()
+        name.active = item.selected
+        name.label(text=item.name, translate=False, icon='ACTION')
+        info = row.row()
+        info.alignment = 'RIGHT'
+        if item.bone_count:
+            info.label(text='%d 骨 → %d / ← %d'
+                            % (item.bone_count, item.forward, item.backward),
+                       translate=False)
+        else:
+            info.label(text='无骨骼通道', translate=False)
+
+    def draw_filter(self, context, layout):
+        pass
+
+    def filter_items(self, context, data, propname):
+        entries = getattr(data, propname)
+        query = context.scene.animret_skel.action_filter
+        flags = [self.bitflag_filter_item] * len(entries)
+        if query:
+            for i, e in enumerate(entries):
+                if not skeleton_rename.action_matches(e, query):
+                    flags[i] &= ~self.bitflag_filter_item
+        return flags, []
+
+
 class ANIMRETSK_PT_panel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -134,10 +168,9 @@ class ANIMRETSK_PT_panel(bpy.types.Panel):
             translate=False, icon='ARMATURE_DATA' if dest else 'INFO')
 
         # 双向转换: 按骨架当前的命名判断该往哪边走
-        fwd = rev = 0
-        if dest and len(s.pairs):
-            fwd, rev = skeleton_rename.count_directions(
-                dest, [(p.old_name, p.new_name) for p in s.pairs])
+        pairs = [(p.old_name, p.new_name) for p in s.pairs]
+        fwd, rev = skeleton_rename.count_directions(
+            skeleton_rename.armature_bone_names(dest), pairs)
         row = box.row(align=True)
         col = row.column(align=True)
         col.enabled = fwd > 0
@@ -150,9 +183,55 @@ class ANIMRETSK_PT_panel(bpy.types.Panel):
                           text='← 还原 (%d)' % rev, icon='BACK')
         op.reverse = True
 
+        # ③ 同一份配置拿去转换动作内部的骨骼引用
+        box = layout.box()
+        box.label(text='③ 用同一份配置转换动作', icon='ACTION')
+
+        row = box.row(align=True)
+        row.operator('animret.action_refresh', icon='FILE_REFRESH')
+        if len(s.actions):
+            row.operator('animret.action_select', text='',
+                         icon='CHECKBOX_HLT').action = 'ALL'
+            row.operator('animret.action_select', text='',
+                         icon='CHECKBOX_DEHLT').action = 'NONE'
+            row.operator('animret.action_select', text='',
+                         icon='UV_SYNC_SELECT').action = 'INVERSE'
+
+        if not len(s.actions):
+            box.label(text='点上面的按钮把当前文件里的动作列出来', icon='INFO')
+            return
+
+        row = box.row(align=True)
+        row.prop(s, 'action_filter', text='', icon='VIEWZOOM')
+        if s.action_filter:
+            hit = sum(1 for e in s.actions
+                      if skeleton_rename.action_matches(e, s.action_filter))
+            row.label(text='%d/%d' % (hit, len(s.actions)))
+            row.operator('animret.action_clear_filter', text='', icon='X')
+        box.template_list('ANIMRETSK_UL_actions', '', s, 'actions', s,
+                          'active_action', rows=8)
+
+        chosen = skeleton_rename.selected_actions(s)
+        a_fwd = sum(1 for e in chosen if e.forward)
+        a_rev = sum(1 for e in chosen if e.backward)
+        box.label(text='已勾选 %d 条动作 (共 %d 条)'
+                       % (len(chosen), len(s.actions)), translate=False)
+        row = box.row(align=True)
+        col = row.column(align=True)
+        col.enabled = a_fwd > 0
+        op = col.operator('animret.action_rename_apply',
+                          text='转换 → (%d)' % a_fwd, icon='FORWARD')
+        op.reverse = False
+        col = row.column(align=True)
+        col.enabled = a_rev > 0
+        op = col.operator('animret.action_rename_apply',
+                          text='← 还原 (%d)' % a_rev, icon='BACK')
+        op.reverse = True
+
 
 classes = (
     ANIMRETSK_UL_entries,
     ANIMRETSK_UL_pairs,
+    ANIMRETSK_UL_actions,
     ANIMRETSK_PT_panel,
 )

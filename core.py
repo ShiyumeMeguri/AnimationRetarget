@@ -92,6 +92,32 @@ def iter_action_fcurves(action):
     return list(getattr(action, 'fcurves', []))
 
 
+def iter_action_groups(action):
+    """汇总 action 所有通道组, 兼容 slotted (4.4+) 与 legacy。
+
+    通道组按骨骼分组、组名即骨骼名, 所以改写动作里的骨骼引用要连组名一起改。
+    """
+    if action is None:
+        return []
+    layers = getattr(action, 'layers', None)
+    if layers:
+        groups = []
+        try:
+            for layer in layers:
+                for strip in layer.strips:
+                    if getattr(strip, 'type', 'KEYFRAME') != 'KEYFRAME':
+                        continue
+                    for slot in action.slots:
+                        cb = strip.channelbag(slot)
+                        if cb is not None:
+                            groups.extend(getattr(cb, 'groups', ()))
+            if groups:
+                return groups
+        except Exception:
+            pass
+    return list(getattr(action, 'groups', []))
+
+
 class _ActionWriter:
     """向 action 写 FCurve 的统一接口 (优先 slotted API, 失败回退 legacy)。"""
 
