@@ -19,6 +19,12 @@
   手动偏移在目标骨架上按层级 FK 求值: 转大腿会带动小腿、扭曲骨整条子链,
   与捕捉对齐姿态严格等价 (自检里以 Blender 自身 FK 为真值断言), 支持 A-pose ↔ T-pose。
 - **位移**: 世界空间传递 + 轴掩码 + 髋高比自动缩放 (体型不同的根运动)。
+- **局部通道** (映射的`局部`开关, 默认关): 把来源骨**自身的局部位移与缩放**也传过来,
+  位移按 `rot(目标骨 rest)⁻¹ @ rot(来源骨 rest)` 换到目标骨轴向、乘骨长比, 缩放按主轴对应。
+  **关节式面部绑定必须开**: 眨眼/张嘴是骨骼平移不是旋转, 只传旋转的话表情一点都过不去
+  (实测源侧位移 0.204 → 目标侧 0.000)。两套脸可以关节位置逐位相同而骨骼轴向差 90°,
+  所以必须换算, 裸抄会朝错方向。身体骨默认不开 —— 两套 rig 比例不同时局部位移没有可比性。
+  关掉时与没有这个功能逐位一致 (自检断言)。
 - **IK**: 解析双骨 IK (保持弯曲平面) / 单关节瞄准 / 阻尼 CCD, `链长` 与旧版约束 chain_count 同义。
 - **FK 求值**: 逐行移植 Blender 内核 `BKE_bone_parent_transform_calc_from_matrices`
   (hinge + 全部 6 种 inherit_scale), 与 depsgraph 偏差在 float32 量化极限内。
@@ -167,6 +173,7 @@ JSON 配置即面板里的预设文件 (设置菜单可导出), 结构:
     {"source": "hips", "dest": "Hips",
      "rot": {"auto": true, "ortho": false, "offset": [0,0,0], "align": null},
      "loc": {"enabled": true, "axes": [true,true,true], "scale_mode": "AUTO", "scale": 1.0},
+     "local": {"enabled": false},
      "ik":  {"enabled": false, "influence": 1.0, "chain": 2}}
   ]}
 ```
@@ -179,7 +186,9 @@ blender -b --factory-startup --python tests\headless_selftest.py
 ```
 
 FK 忠实度(vs depsgraph) / 约束式结果数值等价 / 自重定向恒等 / IK 可达 /
-手动偏移带动整条子链且与对齐姿态捕捉等价 / 批量逐位确定性 / 单烘==批量 /
+手动偏移带动整条子链且与对齐姿态捕捉等价 /
+局部通道透传(轴向差 222° 下位移量与世界方向都对上、缩放按主轴走、关掉时逐位无痕) /
+批量逐位确定性 / 单烘==批量 /
 根位移非常数 / 隐藏骨照烘 / 零约束零残留 / JSON 预设覆盖保存与往返 /
 操作符 / CLI 全链路 + FBX / 骨架结构导出往返 /
 骨架重命名两阶段防冲突(含互换名)+ 引擎联动顶点组/FCurve/约束校验 /

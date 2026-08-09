@@ -250,6 +250,13 @@ class Skeleton:
     def rest_world_head(self, i):
         return self.matrix_world @ self.bones[i].rest.to_translation()
 
+    def rest_world_length(self, i):
+        """骨长的世界尺度 (物体缩放已计入)。"""
+        b = self.bones[i]
+        head = self.matrix_world @ b.rest.to_translation()
+        tail = self.matrix_world @ (b.rest @ Vector((0.0, b.length, 0.0)))
+        return (tail - head).length
+
 
 # ---------------------------------------------------------------------------
 # 父链变换 — 逐行移植 BKE_bone_parent_transform_calc_from_matrices / _apply
@@ -375,6 +382,8 @@ class SolvedMapping:
     __slots__ = ('src_name', 'dest_name', 'src_i', 'dest_i', 'q_offset',
                  'loc_enabled', 'loc_axes', 'loc_scale', 'loc_rebase',
                  'src_origin', 'dest_origin',
+                 'local_enabled', 'local_conv', 'local_scale', 'local_axis',
+                 'local_connect',
                  'ik_enabled', 'ik_chain', 'ik_influence')
 
     def __init__(self):
@@ -385,6 +394,11 @@ class SolvedMapping:
         self.loc_rebase = False
         self.src_origin = Vector()
         self.dest_origin = Vector()
+        self.local_enabled = False          # 局部通道 (位移/缩放) 透传
+        self.local_conv = Quaternion()      # 源骨 rest 轴 → 目标骨 rest 轴
+        self.local_scale = 1.0              # 两侧骨长比 (局部位移的尺度)
+        self.local_axis = (0, 1, 2)         # 缩放通道的轴对应
+        self.local_connect = False          # 目标骨 connected: 引擎会忽略基座位移
         self.ik_enabled = False
         self.ik_chain = 2
         self.ik_influence = 1.0
@@ -395,6 +409,16 @@ def _ortho_snap(q):
     for k in range(3):
         e[k] = round(e[k] / _HALF_PI) * _HALF_PI
     return e.to_quaternion()
+
+
+def _axis_mapping(q):
+    """局部轴换算 → 目标骨每根轴主要对应源骨的哪根轴 (缩放通道用)。
+
+    缩放是骨骼局部帧里的对角量, 换帧后一般不再对角; 两套 rig 的轴差实际上
+    都是 90° 倍数的置换, 取主轴即精确。
+    """
+    m = q.to_matrix()
+    return tuple(max(range(3), key=lambda j: abs(m[i][j])) for i in range(3))
 
 
 def _manual_offset(rot_spec):
@@ -491,6 +515,20 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
         if correction is not None:
             q = q @ correction
         m.q_offset = q.normalized()
+
+        # 局部通道换算 (表情类微位移/缩放): 源骨 rest 轴 → 目标骨 rest 轴。
+        # 两套脸的关节位置可以完全一致而骨骼轴向完全不同, 裸抄位移会朝错方向。
+        local = md.get('local', {})
+        m.local_enabled = bool(local.get('enabled', False)
+                               if isinstance(local, dict) else local)
+        if m.local_enabled:
+            m.local_conv = (dest_skel.rest_world_rot(di).inverted()
+                            @ src_skel.rest_world_rot(si)).normalized()
+            src_len = src_skel.rest_world_length(si)
+            m.local_scale = (dest_skel.rest_world_length(di) / src_len
+                             if src_len > 1e-9 else 1.0)
+            m.local_axis = _axis_mapping(m.local_conv)
+            m.local_connect = dest_skel.bones[di].use_connect
 
         loc = md.get('loc', {})
         m.loc_enabled = bool(loc.get('enabled', False))
@@ -625,17 +663,20 @@ def _solve_ccd(joint_heads, effector, goal, iterations=24, damping=0.9,
 # 单帧求解
 # ---------------------------------------------------------------------------
 
-def _apply_targets(dest_skel, rot_targets, loc_targets):
-    """按世界空间目标 (旋转/位置) 重建目标骨架姿态。
+def _apply_targets(dest_skel, rot_targets, loc_targets, local_targets=None):
+    """按世界空间目标 (旋转/位置) + 局部通道目标重建目标骨架姿态。
 
-    rot_targets: {dest_i: Quaternion 世界旋转}
-    loc_targets: {dest_i: (Vector 世界位置, (bx,by,bz) 轴掩码)}
+    rot_targets:   {dest_i: Quaternion 世界旋转}
+    loc_targets:   {dest_i: (Vector 世界位置, (bx,by,bz) 轴掩码)}
+    local_targets: {dest_i: (Vector 局部位移, Vector 局部缩放)} —
+                   已换算到目标骨 rest 帧, 直接落进 basis (表情类微位移)
     返回 (pose 骨架空间矩阵列表, bases {dest_i: basis 4x4})。
     未被任何目标触及的骨骼保持 rest (basis=I, 不输出)。
     """
     n = len(dest_skel.bones)
     pose = [None] * n
     bases = {}
+    local_targets = local_targets or {}
     w = dest_skel.matrix_world
     w_inv = dest_skel.matrix_world_inv
     obj_rot_inv = dest_skel.world_rot_inv
@@ -644,7 +685,8 @@ def _apply_targets(dest_skel, rot_targets, loc_targets):
         cm = bpt_apply(bpt, _IDENTITY4)
         has_rot = i in rot_targets
         has_loc = i in loc_targets and not dest_skel.bones[i].use_connect
-        if not has_rot and not has_loc:
+        has_local = i in local_targets
+        if not has_rot and not has_loc and not has_local:
             pose[i] = cm
             continue
         if has_rot:
@@ -659,11 +701,17 @@ def _apply_targets(dest_skel, rot_targets, loc_targets):
                               p_goal_w.y if axes[1] else p_fk_w.y,
                               p_goal_w.z if axes[2] else p_fk_w.z))
             t_arm = w_inv @ blended
+        elif has_local:
+            # 局部位移作用在骨骼 rest 帧里 (与 Blender 的 basis 平移同一处)
+            t_arm = bpt.loc_mat @ local_targets[i][0]
         # 只替换链矩阵的极分解旋转, 保留缩放/剪切残差 —
         # 目标旋转 == FK 旋转时 basis 严格等于单位阵 (恒等性逐位成立)
         cm3 = cm.to_3x3()
         stretch = rot_of(cm).to_matrix().inverted() @ cm3
-        mat = (q_arm.to_matrix() @ stretch).to_4x4()
+        mat3 = q_arm.to_matrix() @ stretch
+        if has_local:
+            mat3 = mat3 @ Matrix.Diagonal(local_targets[i][1])
+        mat = mat3.to_4x4()
         mat.translation = t_arm
         pose[i] = mat
         # 反解 basis: 3x3 走 rotscale, 平移走 loc_mat (post_scale 逆先除掉)
@@ -681,6 +729,28 @@ def _apply_targets(dest_skel, rot_targets, loc_targets):
     return pose, bases
 
 
+_ONE = Vector((1.0, 1.0, 1.0))
+
+
+def _local_channel(mapping, basis):
+    """源骨 basis 的位移/缩放 → 换算到目标骨 rest 帧; 两者皆为空时返回 None。
+
+    旋转不走这条路 (世界公式已经把两侧 rest 朝向差解干净了), 这里只补
+    世界公式表达不了的两个通道 —— 关节式面部绑定的表情几乎全在这两个通道里。
+    """
+    t = basis.to_translation()
+    s = basis.to_scale()
+    moved = t.length_squared > 1e-18 and not mapping.local_connect
+    scaled = (s - _ONE).length_squared > 1e-18
+    if not moved and not scaled:
+        return None
+    t_out = (mapping.local_conv @ t) * mapping.local_scale if moved \
+        else Vector((0.0, 0.0, 0.0))
+    s_out = Vector((s[mapping.local_axis[0]], s[mapping.local_axis[1]],
+                    s[mapping.local_axis[2]])) if scaled else _ONE.copy()
+    return t_out, s_out
+
+
 def _ik_joint_indices(dest_skel, dest_i, chain_count):
     """IK 生效关节: 自 dest 父骨向上 (chain_count - 1) 根, 根关节在前。"""
     joints = []
@@ -694,14 +764,16 @@ def _ik_joint_indices(dest_skel, dest_i, chain_count):
     return joints
 
 
-def solve_frame(dest_skel, mappings, src_world_mats):
+def solve_frame(dest_skel, mappings, src_world_mats, src_basis_mats):
     """单帧重定向求解 (纯函数)。
 
     src_world_mats: {源骨名: 世界空间姿态矩阵}
+    src_basis_mats: {源骨名: basis 4x4} — 源骨骼的局部通道原值, 其中的位移与
+        缩放会换算到目标骨 rest 帧后透传 (面部表情几乎全是这两个通道)。
     返回 {目标骨名: basis 4x4} — 直接可写入 pose.bones[].matrix_basis
-    或拆解为 location / rotation 关键帧。
+    或拆解为 location / rotation / scale 关键帧。
     """
-    rot_targets, loc_targets = {}, {}
+    rot_targets, loc_targets, local_targets = {}, {}, {}
     goals = {}
     for m in mappings:
         W = src_world_mats.get(m.src_name)
@@ -709,6 +781,11 @@ def solve_frame(dest_skel, mappings, src_world_mats):
             continue
         loc, rot, _sca = W.decompose()
         rot_targets[m.dest_i] = rot @ m.q_offset
+        if m.local_enabled:
+            basis = src_basis_mats.get(m.src_name)
+            local = _local_channel(m, basis) if basis is not None else None
+            if local is not None:
+                local_targets[m.dest_i] = local
         if m.loc_enabled or m.ik_enabled:
             if m.loc_rebase:
                 p = m.dest_origin + (loc - m.src_origin) * m.loc_scale
@@ -718,7 +795,8 @@ def solve_frame(dest_skel, mappings, src_world_mats):
             if m.loc_enabled:
                 loc_targets[m.dest_i] = (p, m.loc_axes)
 
-    pose, bases = _apply_targets(dest_skel, rot_targets, loc_targets)
+    pose, bases = _apply_targets(dest_skel, rot_targets, loc_targets,
+                                 local_targets)
 
     # IK 修正: 按链根深度排序逐条求解, 每条解完整体重建一次 (确定性)
     ik_list = [m for m in mappings
@@ -741,7 +819,8 @@ def solve_frame(dest_skel, mappings, src_world_mats):
             for j, dq in zip(joints, deltas):
                 cur = rot_of(w @ pose[j])
                 rot_targets[j] = (dq @ cur).normalized()
-            pose, bases = _apply_targets(dest_skel, rot_targets, loc_targets)
+            pose, bases = _apply_targets(dest_skel, rot_targets, loc_targets,
+                                         local_targets)
 
     return {dest_skel.bones[i].name: b for i, b in bases.items()}
 

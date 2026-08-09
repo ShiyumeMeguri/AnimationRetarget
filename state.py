@@ -160,6 +160,14 @@ class AnimRetMapping(bpy.types.PropertyGroup):
     loc_scale: bpy.props.FloatProperty(
         name='缩放系数', default=1.0, soft_min=0.01, soft_max=100.0,
         override={'LIBRARY_OVERRIDABLE'}, update=_on_mapping_edit)
+    local_enabled: bpy.props.BoolProperty(
+        name='局部通道', default=False,
+        description='把来源骨自身的局部位移与缩放也传过来 (换算到目标骨轴向, '
+                    '按骨长比缩放)\n'
+                    '关节式面部绑定的表情几乎全在这两个通道里: 眨眼/张嘴是骨骼'
+                    '平移, 只传旋转会什么都传不到\n'
+                    '身体骨一般不需要 — 两套 rig 比例不同时局部位移没有可比性',
+        override={'LIBRARY_OVERRIDABLE'}, update=_on_mapping_edit)
 
     # --- IK ---
     ik_enabled: bpy.props.BoolProperty(
@@ -210,6 +218,8 @@ class AnimRetMapping(bpy.types.PropertyGroup):
                 'scale_mode': self.loc_scale_mode,
                 'scale': self.loc_scale,
             }
+        if self.local_enabled:
+            d['local'] = {'enabled': True}
         if self.ik_enabled:
             d['ik'] = {
                 'enabled': True,
@@ -236,6 +246,9 @@ class AnimRetMapping(bpy.types.PropertyGroup):
         self.loc_scale_mode = mode if mode in {'NONE', 'AUTO', 'MANUAL'} \
             else 'NONE'
         self['loc_scale'] = float(loc.get('scale', 1.0))
+        local = d.get('local', {})
+        self['local_enabled'] = bool(local.get('enabled', False)
+                                     if isinstance(local, dict) else local)
         ik = d.get('ik', {})
         self['ik_enabled'] = bool(ik.get('enabled', False))
         self['ik_influence'] = float(ik.get('influence', 1.0))

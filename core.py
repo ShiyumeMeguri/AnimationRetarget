@@ -455,19 +455,34 @@ def action_frame_list(action, step=1.0, frame_start=None, frame_end=None):
 # ---------------------------------------------------------------------------
 
 def src_world_mats_pure(skel, sampler, frame, needed_names):
+    """返回 (世界矩阵表, basis 表) — basis 供局部通道 (位移/缩放) 透传。"""
     obj_w = sampler.world_matrix(frame)
     skel.update_world(obj_w)
-    pose = rm.fk_pose(skel, sampler.basis_map(frame))
-    return {n: obj_w @ pose[skel.index[n]] for n in needed_names
-            if n in skel.index}
+    basis = sampler.basis_map(frame)
+    pose = rm.fk_pose(skel, basis)
+    world, bases = {}, {}
+    for n in needed_names:
+        i = skel.index.get(n)
+        if i is None:
+            continue
+        world[n] = obj_w @ pose[i]
+        if i in basis:
+            bases[n] = basis[i]
+    return world, bases
 
 
 def src_world_mats_scene(src_obj, depsgraph, needed_names):
     """SCENE 模式: 读取 depsgraph 评估结果 (源骨架自带约束/驱动也能被烘下来)。"""
     ev = src_obj.evaluated_get(depsgraph)
     w = ev.matrix_world
-    return {n: w @ ev.pose.bones[n].matrix for n in needed_names
-            if n in ev.pose.bones}
+    world, bases = {}, {}
+    for n in needed_names:
+        pb = ev.pose.bones.get(n)
+        if pb is None:
+            continue
+        world[n] = w @ pb.matrix
+        bases[n] = pb.matrix_basis.copy()
+    return world, bases
 
 
 # ---------------------------------------------------------------------------
@@ -476,22 +491,28 @@ def src_world_mats_scene(src_obj, depsgraph, needed_names):
 
 def _decompose_series(bases_per_frame, bone_name, rotation_mode):
     """帧序列 basis → 各通道数值数组 (四元数半球连续 / 欧拉就近兼容)。"""
-    locs, quats = [], []
-    has_loc = False
+    locs, quats, scales = [], [], []
+    has_loc = has_scale = False
+    one = Vector((1.0, 1.0, 1.0))
     for bases in bases_per_frame:
         b = bases.get(bone_name)
         if b is None:
-            loc, rot = Vector(), Quaternion()
+            loc, rot, sca = Vector(), Quaternion(), one.copy()
         else:
-            loc, rot, _ = b.decompose()
+            loc, rot, sca = b.decompose()
         if loc.length_squared > 1e-14:
             has_loc = True
+        if (sca - one).length_squared > 1e-14:
+            has_scale = True
         locs.append(loc)
         quats.append(rot)
+        scales.append(sca)
     rm.quaternion_make_consistent(quats)
     channels = {}
     if has_loc:
         channels['location'] = [[v[k] for v in locs] for k in range(3)]
+    if has_scale:
+        channels['scale'] = [[v[k] for v in scales] for k in range(3)]
     if rotation_mode == 'QUATERNION':
         channels['rotation_quaternion'] = [[q[k] for q in quats]
                                            for k in range(4)]
@@ -583,8 +604,9 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
                 scene.frame_set(int(f), subframe=max(0.0, min(0.999999, f - int(f))))
                 dg = depsgraph_step() if depsgraph_step else \
                     bpy.context.evaluated_depsgraph_get()
-                world = src_world_mats_scene(src_obj, dg, needed)
-                bases_per_frame.append(rm.solve_frame(dest_skel, mappings, world))
+                world, src_bases = src_world_mats_scene(src_obj, dg, needed)
+                bases_per_frame.append(
+                    rm.solve_frame(dest_skel, mappings, world, src_bases))
         finally:
             ad.action = saved[0]
             if saved[1] is not None and hasattr(ad, 'action_slot'):
@@ -600,8 +622,9 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
     else:
         sampler = ActionSampler(src_obj, src_skel, action)
         for f in frames:
-            world = src_world_mats_pure(src_skel, sampler, f, needed)
-            bases_per_frame.append(rm.solve_frame(dest_skel, mappings, world))
+            world, src_bases = src_world_mats_pure(src_skel, sampler, f, needed)
+            bases_per_frame.append(
+                rm.solve_frame(dest_skel, mappings, world, src_bases))
 
     # 收集所有被触及的目标骨骼 (含 IK 链上的非映射骨)
     touched = []
@@ -777,8 +800,10 @@ def _apply_preview_all(depsgraph=None):
                 _preview_jobs.pop(key, None)
                 continue
             job['dest_skel'].update_world(dest_obj.matrix_world)
-            world = src_world_mats_scene(src_obj, depsgraph, job['needed'])
-            bases = rm.solve_frame(job['dest_skel'], job['mappings'], world)
+            world, src_bases = src_world_mats_scene(src_obj, depsgraph,
+                                                    job['needed'])
+            bases = rm.solve_frame(job['dest_skel'], job['mappings'], world,
+                                   src_bases)
             changed = False
             for name, basis in bases.items():
                 pb = dest_obj.pose.bones.get(name)

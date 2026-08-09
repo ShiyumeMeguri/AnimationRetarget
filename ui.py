@@ -52,12 +52,14 @@ class ANIMRET_UL_mappings(bpy.types.UIList):
         elif s.editing_type == 2:
             row.prop(item, 'loc_enabled', icon='CON_LOCLIKE', icon_only=True)
             row.label(text=item.dest, translate=False)
+            sub = layout.row(align=True)
             if item.loc_enabled:
-                sub = layout.row(align=True)
                 sub.prop(item, 'loc_axes', text='', toggle=True)
                 sub.prop(item, 'loc_scale_mode', text='')
                 if item.loc_scale_mode == 'MANUAL':
                     sub.prop(item, 'loc_scale', text='')
+            sub.prop(item, 'local_enabled', text='局部', toggle=True,
+                     icon='CON_TRANSLIKE')
         elif s.editing_type == 3:
             row.prop(item, 'ik_enabled', icon='CON_KINEMATIC', icon_only=True)
             row.label(text=item.dest, translate=False)

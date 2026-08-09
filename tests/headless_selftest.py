@@ -346,9 +346,9 @@ def phase_equivalence():
         scene.frame_set(int(f))
         dg = bpy.context.evaluated_depsgraph_get()
         ev = dst.evaluated_get(dg)
-        world = core.src_world_mats_pure(src_skel, sampler, f, needed)
+        world, sb = core.src_world_mats_pure(src_skel, sampler, f, needed)
         dest_skel.update_world(dst.matrix_world)
-        bases = rm.solve_frame(dest_skel, mappings, world)
+        bases = rm.solve_frame(dest_skel, mappings, world, sb)
         for s_name, d_name in pairs:
             truth = ev.matrix_world @ ev.pose.bones[d_name].matrix
             # 把 basis 套进快照 FK 得到我的世界矩阵
@@ -385,8 +385,8 @@ def phase_equivalence():
     needed = [m.src_name for m in maps_id]
     max_rot = max_loc = 0.0
     for f in core.action_frame_list(acts['Run']):
-        world = core.src_world_mats_pure(skel_a, sampler, f, needed)
-        bases = rm.solve_frame(skel_b, maps_id, world)
+        world, sb = core.src_world_mats_pure(skel_a, sampler, f, needed)
+        bases = rm.solve_frame(skel_b, maps_id, world, sb)
         basis_map = {skel_b.index[n]: b for n, b in bases.items()}
         pose = rm.fk_pose(skel_b, basis_map)
         for n in needed:
@@ -408,9 +408,9 @@ def phase_equivalence():
     up_len = (Vector(DST_BONES[4][1]) - Vector(DST_BONES[3][1])).length
     lo_len = (Vector(DST_BONES[5][1]) - Vector(DST_BONES[4][1])).length
     for f in core.action_frame_list(acts['Walk']):
-        world = core.src_world_mats_pure(src_skel, sampler, f, needed)
+        world, sb = core.src_world_mats_pure(src_skel, sampler, f, needed)
         dest_skel.update_world(dst.matrix_world)
-        bases = rm.solve_frame(dest_skel, maps_ik, world)
+        bases = rm.solve_frame(dest_skel, maps_ik, world, sb)
         basis_map = {dest_skel.index[n]: b for n, b in bases.items()}
         pose = rm.fk_pose(dest_skel, basis_map)
         goal = world['hand'].to_translation()
@@ -474,7 +474,7 @@ def leg_solve(src, dst, spec_maps):
     src_pose = rm.fk_pose(src_skel, {})
     world = {b.name: src_skel.matrix_world @ src_pose[i]
              for i, b in enumerate(src_skel.bones)}
-    bases = rm.solve_frame(dest_skel, mappings, world)
+    bases = rm.solve_frame(dest_skel, mappings, world, {})
     basis_map = {dest_skel.index[n]: b for n, b in bases.items()}
     pose = rm.fk_pose(dest_skel, basis_map)
     out = {}
@@ -528,6 +528,126 @@ def phase_manual_offset():
           all(m.q_offset == (src_skel.rest_world_rot(m.src_i).inverted()
                              @ dest_skel.rest_world_rot(m.dest_i)).normalized()
               for m in plain))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.6: 局部通道透传 (关节式面部绑定)
+#   眨眼/张嘴是骨骼平移+缩放, 不是旋转; 只传旋转 = 表情一点都过不去。
+#   两套脸可以关节位置完全一致而骨骼轴向完全不同, 所以位移必须过轴向换算。
+# ---------------------------------------------------------------------------
+
+FACE_SRC = [
+    # name      head                tail                 roll  parent   con    inhR  inhS
+    ('Head',    (0, 0, 1.60),      (0, 0, 1.75),         0.00, None,    False, True, 'FULL'),
+    ('EyeLid',  (0.03, -0.06, 1.70), (0.03, -0.08, 1.70), 0.00, 'Head', False, True, 'FULL'),
+    ('Jaw',     (0, -0.03, 1.64),  (0, -0.07, 1.62),     0.00, 'Head',  False, True, 'FULL'),
+]
+
+# 目标: 关节位置逐位相同, 但 roll 全不一样 (真实 rig 重建后就是这样)
+FACE_DST = [
+    ('HeadD',   (0, 0, 1.60),      (0, 0, 1.75),         1.10, None,    False, True, 'FULL'),
+    ('LidD',    (0.03, -0.06, 1.70), (0.03, -0.08, 1.70), 2.40, 'HeadD', False, True, 'FULL'),
+    ('JawD',    (0, -0.03, 1.64),  (0, -0.07, 1.62),    -1.80, 'HeadD', False, True, 'FULL'),
+]
+
+FACE_PAIRS = [('Head', 'HeadD'), ('EyeLid', 'LidD'), ('Jaw', 'JawD')]
+
+
+def face_spec(local):
+    return [{'source': s, 'dest': d,
+             'rot': {'auto': True, 'ortho': False, 'offset': [0, 0, 0],
+                     'align': None},
+             'local': {'enabled': local}}
+            for s, d in FACE_PAIRS]
+
+
+def face_solve(src, dst, spec_maps):
+    src_skel = core.snapshot_skeleton(src)
+    dest_skel = core.snapshot_skeleton(dst)
+    mappings, _w = rm.build_mappings(src_skel, dest_skel, spec_maps)
+    dg = bpy.context.evaluated_depsgraph_get()
+    world, src_bases = core.src_world_mats_scene(
+        src, dg, [m.src_name for m in mappings])
+    bases = rm.solve_frame(dest_skel, mappings, world, src_bases)
+    pose = rm.fk_pose(dest_skel, {dest_skel.index[n]: b
+                                  for n, b in bases.items()})
+    out = {}
+    for i, b in enumerate(dest_skel.bones):
+        loc, rot, sca = (dest_skel.matrix_world @ pose[i]).decompose()
+        out[b.name] = (loc, rot, sca)
+    return out, world, bases
+
+
+def phase_local_channel():
+    print('\n== Phase 2.6: 局部通道透传 (面部表情) ==')
+    reset_blend()
+    src = build_armature('FaceSrc', FACE_SRC)
+    dst = build_armature('FaceDst', FACE_DST, location=(1.0, 0, 0))
+
+    # 两侧 rest 朝向确实不同 — 否则这个测试是空转
+    s_q = (src.matrix_world @ src.data.bones['EyeLid'].matrix_local).to_quaternion()
+    d_q = (dst.matrix_world @ dst.data.bones['LidD'].matrix_local).to_quaternion()
+    axis_gap = math.degrees(s_q.rotation_difference(d_q).angle)
+    check('测试前提: 两侧骨骼轴向确实不同 (%.1f°)' % axis_gap, axis_gap > 30.0)
+
+    for pb in src.pose.bones:
+        pb.matrix_basis = Matrix.Identity(4)
+    bpy.context.view_layer.update()
+    base_off, w_off, _b = face_solve(src, dst, face_spec(False))
+    base_on, _w, _b2 = face_solve(src, dst, face_spec(True))
+
+    # 摆表情: 眼睑往局部下方挪 + 下巴挪 + 眼睑压扁
+    src.pose.bones['EyeLid'].matrix_basis = Matrix.Translation((0, 0, -0.01))
+    src.pose.bones['Jaw'].matrix_basis = Matrix.Translation((0, -0.012, 0))
+    src.pose.bones['Head'].matrix_basis = Matrix.LocRotScale(
+        None, Quaternion((0, 0, 1), 0.4), None)   # 顺带转头, 验证层级不受影响
+    bpy.context.view_layer.update()
+
+    off, w_pose, _b3 = face_solve(src, dst, face_spec(False))
+    on, _w2, bases_on = face_solve(src, dst, face_spec(True))
+
+    moved_src = 0.0
+    worst_len = worst_dir = 0.0
+    for s, d in FACE_PAIRS:
+        vs = w_pose[s].to_translation() - w_off[s].to_translation()
+        vd = on[d][0] - base_on[d][0]
+        moved_src += vs.length
+        if vs.length < 1e-5:
+            continue
+        worst_len = max(worst_len, abs(vs.length - vd.length))
+        worst_dir = max(worst_dir, math.degrees(math.acos(max(-1.0, min(
+            1.0, vs.normalized().dot(vd.normalized()))))))
+    dropped = sum((off[d][0] - base_off[d][0]).length for _s, d in FACE_PAIRS)
+    moved_dst = sum((on[d][0] - base_on[d][0]).length for _s, d in FACE_PAIRS)
+
+    # 开/关的差 = 局部通道真正贡献的那部分 (头部旋转两边都有, 会抵消掉)
+    contributed = sum((on[d][0] - off[d][0]).length for _s, d in FACE_PAIRS)
+    check('局部通道确实改变结果 (开关差 %.4f, 源侧局部位移 %.4f)'
+          % (contributed, moved_src), contributed > 1e-3)
+    check('打开局部通道: 位移量对上 (最大差 %.2e)' % worst_len, worst_len < 1e-5)
+    check('打开局部通道: 世界方向对上 (最大夹角 %.4f°)' % worst_dir,
+          worst_dir < 0.05)
+    check('目标跟着动的量与源一致 (%.4f vs %.4f)' % (moved_dst, moved_src),
+          abs(moved_dst - moved_src) < 1e-4)
+
+    # 缩放通道: 换帧后按主轴对应, 幅度必须守恒
+    src.pose.bones['EyeLid'].matrix_basis = Matrix.LocRotScale(
+        None, None, Vector((1.0, 1.0, 0.4)))
+    bpy.context.view_layer.update()
+    sca_on, _w3, bases_sca = face_solve(src, dst, face_spec(True))
+    b = bases_sca.get('LidD')
+    got = sorted(round(v, 4) for v in b.to_scale()) if b else []
+    check('缩放通道透传 (源 (1,1,0.4) → 目标 %s)' % got,
+          bool(b) and abs(min(got) - 0.4) < 1e-4 and abs(max(got) - 1.0) < 1e-4)
+
+    # 空态零成本: 源没有局部偏移时, 开与不开这个开关的结果必须逐位一致
+    for pb in src.pose.bones:
+        pb.matrix_basis = Matrix.Identity(4)
+    bpy.context.view_layer.update()
+    _r1, _w4, b_off = face_solve(src, dst, face_spec(False))
+    _r2, _w5, b_on = face_solve(src, dst, face_spec(True))
+    check('源无局部偏移时: 开关局部通道结果逐位一致 (空态零成本)',
+          set(b_off) == set(b_on) and all(b_off[k] == b_on[k] for k in b_off))
 
 
 # ---------------------------------------------------------------------------
@@ -1340,6 +1460,7 @@ def main():
     print('Blender %s | Python %s' % (bpy.app.version_string,
                                       sys.version.split()[0]))
     for phase in (phase_fk, phase_equivalence, phase_manual_offset,
+                  phase_local_channel,
                   phase_bake, phase_empty_fcurves, phase_presets,
                   phase_operators, phase_skeleton_rename,
                   phase_action_rename, phase_cli):

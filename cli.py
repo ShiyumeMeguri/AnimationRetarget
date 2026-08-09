@@ -178,6 +178,8 @@ def spec_from_idprops(arm_data):
                 it.get('loc_scale_mode', 'NONE'),
                 'scale': float(it.get('loc_scale', 1.0)),
             }
+        if it.get('local_enabled'):
+            md['local'] = {'enabled': True}
         if it.get('ik_enabled'):
             md['ik'] = {'enabled': True,
                         'influence': float(it.get('ik_influence', 1.0)),
