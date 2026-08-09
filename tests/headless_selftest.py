@@ -1281,6 +1281,56 @@ def phase_action_rename():
     check('操作符: 反向还原 FINISHED 且逐条复原',
           r == {'FINISHED'} and _paths_of(act) == before)
 
+    # 导入动画: 只要动作, 骨架/网格一概不留
+    cli = __import__(PKG + '.cli', fromlist=['x'])
+    tmp = tempfile.mkdtemp(prefix='animret_imp_')
+    fbx_path = os.path.join(tmp, 'ImportedAnim.fbx')
+    if not cli.ensure_fbx_addon():
+        check('FBX 导入导出可用', False, '环境里没有 io_scene_fbx')
+        addon.unregister()
+        return
+    core.assign_action(arm, act)
+    for o in bpy.data.objects:
+        o.select_set(o is arm)
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.export_scene.fbx(filepath=fbx_path, use_selection=True,
+                             bake_anim=True, object_types={'ARMATURE'})
+
+    reset_blend()
+    try:
+        addon.register()
+    except ValueError:
+        pass
+    actions, failures = core.import_actions([fbx_path])
+    check('导入动画: 拿到动作 (%d 条, 失败 %d)' % (len(actions), len(failures)),
+          len(actions) == 1 and not failures)
+    check('导入动画: 一个对象都没留下 (%d)' % len(bpy.data.objects),
+          len(bpy.data.objects) == 0)
+    check('导入动画: 骨架数据块也没留下 (%d)' % len(bpy.data.armatures),
+          len(bpy.data.armatures) == 0)
+    check('导入动画: 按文件名命名并打了 fake user',
+          actions and actions[0].name == 'ImportedAnim'
+          and actions[0].use_fake_user)
+    check('导入动画: 骨骼通道确实带进来了 (%d 根)'
+          % len(skel.action_bone_names(actions[0]) if actions else ()),
+          bool(actions) and len(skel.action_bone_names(actions[0])) >= 4)
+
+    s = bpy.context.scene.animret_skel
+    r = bpy.ops.animret.action_import(directory=tmp, whole_folder=True)
+    check('操作符: 整个文件夹导入 FINISHED', r == {'FINISHED'})
+    check('操作符: 导入后自动进列表 (%d 条)' % len(s.actions),
+          len(s.actions) == len(bpy.data.actions) == 2)
+    check('操作符: 导入后依然一个对象都没有', len(bpy.data.objects) == 0)
+    r = bpy.ops.animret.action_import(directory=tmp, whole_folder=False)
+    check('操作符: 没选文件时拒绝执行', r == {'CANCELLED'})
+
+    # CLI 那条"要骨架"的导入路径与面板共用同一套底层, 一并验
+    reset_blend()
+    sources = cli.import_fbx_sources(fbx_path)
+    check('CLI 导入: 拿到 (骨架, 动作) 且动作按文件名命名',
+          len(sources) == 1 and sources[0][0].type == 'ARMATURE'
+          and [a.name for a in sources[0][1]] == ['ImportedAnim'])
+
     addon.unregister()
 
 

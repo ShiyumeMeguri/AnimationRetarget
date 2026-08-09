@@ -16,7 +16,9 @@
 import os
 
 import bpy
+from bpy_extras.io_utils import ImportHelper
 
+from . import core
 from . import presets
 from . import skeleton_rename
 from .state import resolve_dest_object
@@ -153,6 +155,61 @@ class ANIMRETSK_OT_action_refresh(bpy.types.Operator):
         s = context.scene.animret_skel
         n = skeleton_rename.refresh_actions(s)
         self.report({'INFO'}, '列出 %d 条动作' % n)
+        return {'FINISHED'}
+
+
+class ANIMRETSK_OT_action_import(bpy.types.Operator, ImportHelper):
+    bl_idname = 'animret.action_import'
+    bl_label = '导入动画'
+    bl_description = ('批量导入动画文件, 只留下动作 —— 导进来的骨架/网格/材质/贴图'
+                      '当场回收干净, 文件里只多出动作\n'
+                      '可多选文件; 勾选"整个文件夹"则把该目录下的全部文件一次导完\n'
+                      '动作按文件名命名并打 fake user, 导完直接进下面的列表')
+    bl_options = {'UNDO'}
+
+    filename_ext = '.fbx'
+    filter_glob: bpy.props.StringProperty(
+        default='*.fbx;*.blend', options={'HIDDEN'})
+    files: bpy.props.CollectionProperty(
+        type=bpy.types.OperatorFileListElement,
+        options={'HIDDEN', 'SKIP_SAVE'})
+    directory: bpy.props.StringProperty(
+        subtype='DIR_PATH', options={'HIDDEN', 'SKIP_SAVE'})
+    whole_folder: bpy.props.BoolProperty(
+        name='整个文件夹', default=False,
+        description='忽略选中项, 把该目录下的全部 .fbx/.blend 一次导完')
+
+    def _paths(self):
+        if self.whole_folder and os.path.isdir(self.directory):
+            names = sorted(f for f in os.listdir(self.directory)
+                           if f.lower().endswith(core.IMPORT_EXTENSIONS))
+        else:
+            names = [f.name for f in self.files if f.name]
+        if not names:
+            return [self.filepath] if os.path.isfile(self.filepath) else []
+        return [os.path.join(self.directory, n) for n in names]
+
+    def execute(self, context):
+        paths = self._paths()
+        if not paths:
+            self.report({'WARNING'}, '没有选中任何文件')
+            return {'CANCELLED'}
+        wm = context.window_manager
+        wm.progress_begin(0, len(paths))
+        try:
+            actions, failures = core.import_actions(
+                paths, on_progress=lambda i, n, p: wm.progress_update(i))
+        finally:
+            wm.progress_end()
+        s = context.scene.animret_skel
+        skeleton_rename.refresh_actions(s)
+        for path, why in failures:
+            self.report({'WARNING'}, '%s: %s' % (os.path.basename(path), why))
+        if not actions:
+            self.report({'ERROR'}, '%d 个文件里一条动作都没导出来' % len(paths))
+            return {'CANCELLED'}
+        self.report({'INFO'}, '已从 %d 个文件导入 %d 条动作 (未保留任何骨架)'
+                    % (len(paths) - len(failures), len(actions)))
         return {'FINISHED'}
 
 
@@ -318,6 +375,7 @@ classes = (
     ANIMRETSK_OT_clear_filter,
     ANIMRETSK_OT_apply_rename,
     ANIMRETSK_OT_action_refresh,
+    ANIMRETSK_OT_action_import,
     ANIMRETSK_OT_action_select,
     ANIMRETSK_OT_action_clear_filter,
     ANIMRETSK_OT_action_rename_apply,

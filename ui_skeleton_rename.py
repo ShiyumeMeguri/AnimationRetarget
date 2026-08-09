@@ -188,17 +188,20 @@ class ANIMRETSK_PT_panel(bpy.types.Panel):
         box.label(text='③ 用同一份配置转换动作', icon='ACTION')
 
         row = box.row(align=True)
-        row.operator('animret.action_refresh', icon='FILE_REFRESH')
+        row.operator('animret.action_import', icon='IMPORT')
+        row.operator('animret.action_refresh', text='列出文件里的动作',
+                     icon='FILE_REFRESH')
         if len(s.actions):
-            row.operator('animret.action_select', text='',
+            row = box.row(align=True)
+            row.operator('animret.action_select', text='全选',
                          icon='CHECKBOX_HLT').action = 'ALL'
-            row.operator('animret.action_select', text='',
+            row.operator('animret.action_select', text='弃选',
                          icon='CHECKBOX_DEHLT').action = 'NONE'
-            row.operator('animret.action_select', text='',
+            row.operator('animret.action_select', text='反选',
                          icon='UV_SYNC_SELECT').action = 'INVERSE'
-
-        if not len(s.actions):
-            box.label(text='点上面的按钮把当前文件里的动作列出来', icon='INFO')
+        else:
+            box.label(text='导入动画文件, 或把当前文件里已有的动作列出来',
+                      icon='INFO')
             return
 
         row = box.row(align=True)

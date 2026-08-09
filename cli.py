@@ -334,21 +334,14 @@ def import_fbx_sources(arg):
         if not os.path.isfile(path):
             emit('warning', message='FBX 不存在: %s' % path)
             continue
-        before_actions = set(bpy.data.actions)
-        before_objects = set(bpy.data.objects)
-        bpy.ops.import_scene.fbx(filepath=path, use_custom_props=True)
-        new_objects = [o for o in bpy.data.objects if o not in before_objects]
-        new_actions = [a for a in bpy.data.actions if a not in before_actions]
+        new_objects, new_actions = core.import_file_datablocks(path)
         arm = next((o for o in new_objects if o.type == 'ARMATURE'), None)
         if arm is None:
             emit('warning', message='FBX 中没有骨架: %s' % path)
             for o in new_objects:
                 bpy.data.objects.remove(o, do_unlink=True)
             continue
-        # 动作改名为文件名 (多动作时附编号), 便于产物命名
-        base = os.path.splitext(os.path.basename(path))[0]
-        for k, a in enumerate(new_actions):
-            a.name = base if len(new_actions) == 1 else '%s_%d' % (base, k)
+        core.name_actions_after_file(new_actions, path)
         out.append((arm, new_actions, new_objects))
         emit('imported', fbx=path, armature=arm.name,
              actions=[a.name for a in new_actions])

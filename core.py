@@ -17,6 +17,7 @@
 根骨骼位移烘焙失败、批量漂移、状态残留这三类问题在结构上不存在。
 """
 
+import os
 import re
 from contextlib import contextmanager
 
@@ -176,6 +177,107 @@ class _ActionWriter:
             except Exception:
                 pass
         return fc
+
+
+# ---------------------------------------------------------------------------
+# 动画文件导入 (面板与 CLI 共用)
+# ---------------------------------------------------------------------------
+
+IMPORT_EXTENSIONS = ('.fbx', '.blend')
+
+
+def _id_collections():
+    """bpy.data 里所有可增删的数据块集合 — 用来精确回收一次导入带进来的东西。"""
+    for prop in bpy.data.bl_rna.properties:
+        if prop.type != 'COLLECTION':
+            continue
+        coll = getattr(bpy.data, prop.identifier, None)
+        if coll is not None and hasattr(coll, 'remove'):
+            yield prop.identifier, coll
+
+
+def snapshot_datablocks():
+    return {name: set(coll) for name, coll in _id_collections()}
+
+
+def purge_new_datablocks(before, keep=()):
+    """删掉快照之后新增的全部数据块 (keep 里的集合除外), 返回删掉的条数。
+
+    对象必须先删: 它持有网格/骨架/材质的使用者计数, 顺序反了后面就删不动。
+    """
+    batches = []
+    for name, coll in _id_collections():
+        if name in keep:
+            continue
+        old = before.get(name, set())
+        fresh = [item for item in coll if item not in old]
+        if fresh:
+            batches.append((0 if name == 'objects' else 1, coll, fresh))
+    batches.sort(key=lambda b: b[0])
+    removed = 0
+    for _order, coll, fresh in batches:
+        for item in fresh:
+            try:
+                coll.remove(item, do_unlink=True)
+                removed += 1
+            except Exception:
+                pass        # 还有使用者的交给 Blender 自己的孤儿回收
+    return removed
+
+
+def import_file_datablocks(path):
+    """导入一个动画文件, 返回 (新增对象, 新增动作)。
+
+    .blend 只从库里取动作 (连对象都不会产生); 其余交给 FBX 导入器。
+    """
+    before_objects = set(bpy.data.objects)
+    before_actions = set(bpy.data.actions)
+    if path.lower().endswith('.blend'):
+        with bpy.data.libraries.load(path, link=False) as (src, dst):
+            dst.actions = list(src.actions)
+    else:
+        bpy.ops.import_scene.fbx(filepath=path, use_custom_props=True)
+    return ([o for o in bpy.data.objects if o not in before_objects],
+            [a for a in bpy.data.actions if a not in before_actions])
+
+
+def name_actions_after_file(actions, path):
+    """动作按文件名命名 (一个文件里有多条时附编号), 便于识别与产物命名。"""
+    base = os.path.splitext(os.path.basename(path))[0]
+    for k, a in enumerate(actions):
+        a.name = base if len(actions) == 1 else '%s_%d' % (base, k)
+    return actions
+
+
+def import_actions(paths, on_progress=None):
+    """批量导入动画文件, 只留下动作 — 骨架/网格/材质/贴图一律当场回收。
+
+    动作打 fake user (导进来没有任何使用者, 不打就存不住)。
+    返回 (新动作列表, [(路径, 原因), …] 失败清单)。
+    """
+    actions, failures = [], []
+    for i, path in enumerate(paths):
+        if on_progress:
+            on_progress(i, len(paths), path)
+        if not os.path.isfile(path):
+            failures.append((path, '文件不存在'))
+            continue
+        before = snapshot_datablocks()
+        try:
+            _objects, new_actions = import_file_datablocks(path)
+        except Exception as e:
+            purge_new_datablocks(before, keep=('actions',))
+            failures.append((path, str(e)))
+            continue
+        if new_actions:
+            name_actions_after_file(new_actions, path)
+            for a in new_actions:
+                a.use_fake_user = True
+            actions.extend(new_actions)
+        else:
+            failures.append((path, '文件里没有动作'))
+        purge_new_datablocks(before, keep=('actions',))
+    return actions, failures
 
 
 def assign_action(obj, action):
