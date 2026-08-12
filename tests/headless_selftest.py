@@ -429,6 +429,97 @@ def phase_equivalence():
 
 
 # ---------------------------------------------------------------------------
+# Phase 2.4: 自动对齐 — rest 约定不同 (T-pose 源 ↔ A-pose 目标) 时
+#   肢体几何(肘弯角)必须逐帧守恒, 无需任何人工 align/offset。
+#   KK(T) → EndField(A) 手臂差 34° 的真实回归见交接文档 §12。
+# ---------------------------------------------------------------------------
+
+T_ARM = [
+    ('hips',     (0, 0, 1.00),    (0, 0.10, 1.05),  0.00, None,       False, True, 'FULL'),
+    ('upperarm', (0.10, 0, 1.40), (0.40, 0, 1.40),  0.30, 'hips',     False, True, 'FULL'),
+    ('forearm',  (0.40, 0, 1.40), (0.66, 0, 1.40), -0.40, 'upperarm', True,  True, 'FULL'),
+    ('hand',     (0.66, 0, 1.40), (0.76, 0, 1.40),  0.10, 'forearm',  True,  True, 'FULL'),
+]
+
+_A = math.radians(45)
+_AX, _AZ = math.cos(_A), math.sin(_A)
+A_ARM = [
+    ('Hips',  (0, 0, 1.05), (0, 0.10, 1.10), 0.00, None, False, True, 'FULL'),
+    ('UpArm', (0.08, 0, 1.45),
+     (0.08 + 0.30 * _AX, 0, 1.45 - 0.30 * _AZ), 0.80, 'Hips', False, True, 'FULL'),
+    ('LoArm', (0.08 + 0.30 * _AX, 0, 1.45 - 0.30 * _AZ),
+     (0.08 + 0.56 * _AX, 0, 1.45 - 0.56 * _AZ), -0.90, 'UpArm', True, True, 'FULL'),
+    ('Hand',  (0.08 + 0.56 * _AX, 0, 1.45 - 0.56 * _AZ),
+     (0.08 + 0.66 * _AX, 0, 1.45 - 0.66 * _AZ), 0.20, 'LoArm', True, True, 'FULL'),
+]
+
+
+def phase_auto_align():
+    print('\n== Phase 2.4: 自动对齐 (T-pose 源 ↔ A-pose 目标, 肘弯守恒) ==')
+    reset_blend()
+    src = build_armature('TSrc', T_ARM)
+    dst = build_armature('ADst', A_ARM, location=(1.0, 0.5, 0),
+                         rotation=(0, 0, math.radians(30)))
+    act = make_action(src, 'Swing')
+    for f in range(1, 25):
+        t = f / 24.0 * 2 * math.pi
+        key_bone(src, 'upperarm', f,
+                 quat=Quaternion(Vector((0.3, 0.8, 0.5)).normalized(),
+                                 0.9 * math.sin(t)))
+        key_bone(src, 'forearm', f,
+                 quat=Quaternion((0, 0, 1), 0.7 * abs(math.sin(t))))
+        key_bone(src, 'hand', f, quat=Quaternion((1, 0, 0), 0.3 * math.cos(t)))
+    reset_pose(src)
+
+    spec_maps = [{'source': s, 'dest': d,
+                  'rot': {'auto': True, 'ortho': False, 'offset': [0, 0, 0],
+                          'align': None}}
+                 for s, d in (('hips', 'Hips'), ('upperarm', 'UpArm'),
+                              ('forearm', 'LoArm'), ('hand', 'Hand'))]
+    skel_s = core.snapshot_skeleton(src)
+    skel_d = core.snapshot_skeleton(dst)
+    maps, warns = rm.build_mappings(skel_s, skel_d, spec_maps)
+    check('T→A build_mappings 无警告', not warns, str(warns))
+
+    rest_dirs_equal = 0
+    for m in maps:
+        if m.dest_name != 'UpArm':
+            continue
+        rest_dirs_equal = math.degrees(m.q_offset.angle)
+    check('上臂 q_offset 非零 (A-pose 差被解出, %.1f°)' % rest_dirs_equal,
+          20.0 < rest_dirs_equal)
+
+    sampler = core.ActionSampler(src, skel_s, act)
+    needed = [m.src_name for m in maps]
+
+    def bend(heads):
+        upper, lower = heads[1] - heads[0], heads[2] - heads[1]
+        return math.degrees(upper.angle(lower))
+
+    max_bend = 0.0
+    for f in core.action_frame_list(act):
+        world, sb = core.src_world_mats_pure(skel_s, sampler, f, needed)
+        bases = rm.solve_frame(skel_d, maps, world, sb)
+        basis_map = {skel_d.index[n]: b for n, b in bases.items()}
+        pose = rm.fk_pose(skel_d, basis_map)
+        src_heads = [world[n].to_translation()
+                     for n in ('upperarm', 'forearm', 'hand')]
+        dst_heads = [(skel_d.matrix_world @ pose[skel_d.index[n]]).to_translation()
+                     for n in ('UpArm', 'LoArm', 'Hand')]
+        max_bend = max(max_bend, abs(bend(src_heads) - bend(dst_heads)))
+    check('T→A 肘弯角逐帧守恒 (max %.3e°)' % max_bend, max_bend < 0.05)
+
+    # rest 约定一致时自动对齐必须严格退化为恒等 (参考朝向逐位 == rest)
+    refs = rm.solve_reference_alignment(
+        skel_s, skel_s, [(skel_s.index[n], skel_s.index[n])
+                         for n, *_ in T_ARM])
+    max_dev = max(math.degrees(
+        (skel_s.rest_world_rot(i).inverted() @ q).angle)
+        for i, q in refs.items())
+    check('同构骨架自动对齐 = 恒等 (max %.2e°)' % max_dev, max_dev < 1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Phase 2.5: 手动偏移的层级性
 #   偏移是"参考姿态"的一部分, 转大腿必须带动小腿与扭曲骨整条子链 —
 #   否则子骨各自把世界朝向钉死, 只有骨头被拖着平移 (腿在膝盖处断开,
@@ -1525,8 +1616,8 @@ def phase_api():
 def main():
     print('Blender %s | Python %s' % (bpy.app.version_string,
                                       sys.version.split()[0]))
-    for phase in (phase_fk, phase_equivalence, phase_manual_offset,
-                  phase_local_channel,
+    for phase in (phase_fk, phase_equivalence, phase_auto_align,
+                  phase_manual_offset, phase_local_channel,
                   phase_bake, phase_empty_fcurves, phase_presets,
                   phase_operators, phase_skeleton_rename,
                   phase_action_rename, phase_api, phase_cli):

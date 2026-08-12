@@ -29,10 +29,12 @@ BKE_bone_parent_transform_calc_from_matrices / _apply (armature.cc),
     Q = rot(src_rest_world)⁻¹ @ rot(dest_ref_world)
 
 其中 dest_ref_world = 目标骨骼在"参考姿态"下的世界朝向 —— 参考姿态描述的是
-"源骨架处于 rest 时目标骨架该摆成什么样": 默认即自身 rest; 用户捕捉了"对齐姿态"
-(让目标骨架摆出与源骨架 rest 相同的姿势) 则取该姿态下的朝向; 手动偏移再叠加其上。
-手动偏移与对齐捕捉同语义, 都在目标骨架上按层级 FK 求值 —— 转父骨会带动整条子链。
-以此支持 A-pose ↔ T-pose 等不同 rest 约定之间的迁移。
+"源骨架处于 rest 时目标骨架该摆成什么样"。这个姿态由 solve_reference_alignment
+从两侧 rest 的关节几何直接解出 (把目标骨架虚拟地摆成源 rest 的样子), 因此
+A-pose ↔ T-pose 等任意 rest 约定差异被逐骨自动解掉, 无需人工干预; 两侧约定
+一致时解严格退化为自身 rest, 同构骨架的行为逐位不变。用户捕捉的"对齐姿态"
+覆盖自动解 (人工陈述优先); 手动偏移再叠加其上。手动偏移与对齐姿态同语义,
+都在目标骨架上按层级 FK 求值 —— 转父骨会带动整条子链。
 
 位移传递 (根骨骼/武器):
     p' = origin_dest + (p_src_world - origin_src) * scale   (按世界轴向掩码混合)
@@ -411,6 +413,91 @@ def _ortho_snap(q):
     return e.to_quaternion()
 
 
+def _solve_direction_alignment(pairs):
+    """把方向组 {v_dest} 转到 {v_src} 上的最小旋转 (闭式, 确定性)。
+
+    主轴 = 两侧方向的归一化和 (rotation_difference); 剩余的绕主轴滚转
+    由 Σ 垂直分量对齐度的 atan2 极值闭式给出。0 约束 → 恒等;
+    1 约束 → 纯最小旋转 (垂直分量为零, 滚转守卫为 0);
+    对称扇形 (方向和为零) → 以首对为主轴。"""
+    if not pairs:
+        return Quaternion()
+    sum_dest = Vector((0.0, 0.0, 0.0))
+    sum_src = Vector((0.0, 0.0, 0.0))
+    for v_dest, v_src in pairs:
+        sum_dest = sum_dest + v_dest
+        sum_src = sum_src + v_src
+    if sum_dest.length_squared < 1e-12 or sum_src.length_squared < 1e-12:
+        sum_dest, sum_src = pairs[0]
+    base = sum_dest.rotation_difference(sum_src)
+    axis = sum_src.normalized()
+    sin_sum = 0.0
+    cos_sum = 0.0
+    for v_dest, v_src in pairs:
+        turned = base @ v_dest
+        turned_perp = turned - axis * turned.dot(axis)
+        target_perp = v_src - axis * v_src.dot(axis)
+        cos_sum += turned_perp.dot(target_perp)
+        sin_sum += turned_perp.cross(target_perp).dot(axis)
+    if abs(sin_sum) < 1e-12 and abs(cos_sum) < 1e-12:
+        return base
+    return (Quaternion(axis, math.atan2(sin_sum, cos_sum)) @ base).normalized()
+
+
+def solve_reference_alignment(src_skel, dest_skel, index_pairs):
+    """自动参考姿态: {目标骨索引: 世界空间参考朝向} —— dest_ref 的构造本体。
+
+    对每根映射骨 (目标骨架拓扑序), 它到每个"最近的已映射子孙"的 rest 关节
+    偏移方向 (经父链累计旋转刚性传输) 必须对齐源侧对应骨间的 rest 方向;
+    逐骨解 _solve_direction_alignment 并沿层级复合。方向约束在刚体传输下
+    只依赖累计旋转, 无需 FK 位置簿记。无子孙约束的链末端纯继承父链传输,
+    与父骨的 rest 关系原样保留。"""
+    src_of = {di: si for si, di in index_pairs}
+    children = [[] for _ in dest_skel.bones]
+    for i, bone in enumerate(dest_skel.bones):
+        if bone.parent >= 0:
+            children[bone.parent].append(i)
+
+    def mapped_descendants(start):
+        found = []
+        stack = list(children[start])
+        while stack:
+            j = stack.pop()
+            if j in src_of:
+                found.append(j)
+            else:
+                stack.extend(children[j])
+        return found
+
+    references = {}
+    accumulated = {}
+    for di in range(len(dest_skel.bones)):
+        if di not in src_of:
+            continue
+        parent_rotation = Quaternion()
+        j = dest_skel.bones[di].parent
+        while j >= 0:
+            if j in accumulated:
+                parent_rotation = accumulated[j]
+                break
+            j = dest_skel.bones[j].parent
+        head_dest = dest_skel.rest_world_head(di)
+        head_src = src_skel.rest_world_head(src_of[di])
+        pairs = []
+        for dc in mapped_descendants(di):
+            v_dest = dest_skel.rest_world_head(dc) - head_dest
+            v_src = src_skel.rest_world_head(src_of[dc]) - head_src
+            if v_dest.length_squared < 1e-14 or v_src.length_squared < 1e-14:
+                continue
+            pairs.append(((parent_rotation @ v_dest).normalized(),
+                          v_src.normalized()))
+        rotation = _solve_direction_alignment(pairs)
+        acc = (rotation @ parent_rotation).normalized()
+        accumulated[di] = acc
+        references[di] = (acc @ dest_skel.rest_world_rot(di)).normalized()
+    return references
+
+
 def _axis_mapping(q):
     """局部轴换算 → 目标骨每根轴主要对应源骨的哪根轴 (缩放通道用)。
 
@@ -429,14 +516,16 @@ def _manual_offset(rot_spec):
     return Euler(offset, 'XYZ').to_quaternion()
 
 
-def _reference_corrections(dest_skel, rot_by_dest):
+def _reference_corrections(dest_skel, rot_by_dest, auto_references):
     """手动偏移在目标骨架上按层级 FK 求值 → {骨索引: 相对自身参考朝向的修正}。
 
     偏移因此等价于"在姿态模式里绕自身轴向转这根骨": 整条子链跟着转 —— 与
     "捕捉对齐姿态"同一语义 (对齐捕捉的本就是一个真实姿态, 天然带层级)。
-    没有任何手动偏移时返回空表, 参考朝向逐位仍是 rest / 对齐捕捉值。
+    偏移骑在参考姿态上: 自动解出的对齐 + 用户捕捉的覆盖, 与 build_mappings
+    取 dest_ref 的规则一致。没有任何手动偏移时返回空表。
     """
-    aligns, offsets = {}, {}
+    aligns = dict(auto_references)
+    offsets = {}
     for di, rot_spec in rot_by_dest.items():
         align = rot_spec.get('align')
         if align:
@@ -491,9 +580,13 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
             continue
         entries.append((md, sname, dname, si, di))
 
+    # 自动参考姿态: 目标骨架按源 rest 的关节几何虚拟摆位 (见模块头)
+    auto_references = solve_reference_alignment(
+        src_skel, dest_skel, [(si, di) for _md, _s, _d, si, di in entries])
     # 手动偏移必须先在目标骨架上整体求值一次, 才能带动各自的子链
     corrections = _reference_corrections(
-        dest_skel, {di: md.get('rot', {}) for md, _s, _d, _si, di in entries})
+        dest_skel, {di: md.get('rot', {}) for md, _s, _d, _si, di in entries},
+        auto_references)
 
     for md, sname, dname, si, di in entries:
         m = SolvedMapping()
@@ -507,7 +600,7 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
             if align:
                 dest_ref = Quaternion(align)  # 捕捉对齐时已存为世界空间
             else:
-                dest_ref = dest_skel.rest_world_rot(di)
+                dest_ref = auto_references[di]
             q = src_rest.inverted() @ dest_ref
             if rot.get('ortho', False):
                 q = _ortho_snap(q)
