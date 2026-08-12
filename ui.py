@@ -20,6 +20,13 @@ from .state import (get_state, get_dest_object, resolve_dest_object,
                     mapping_matches)
 
 
+# Bone names are the column the eye actually scans, and they are long
+# ('Bip001_R_Finger22') while their settings are a toggle and three short angles.
+# Two plain rows would split the width evenly and truncate exactly the half that
+# carries the identity, so the name side is given the larger share explicitly.
+NAME_COLUMN_FACTOR = 0.45
+
+
 class ANIMRET_UL_mappings(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data,
                   active_propname, index, flt_flag):
@@ -27,7 +34,12 @@ class ANIMRET_UL_mappings(bpy.types.UIList):
         dest = get_dest_object(context)
         layout.alert = not item.is_valid(s)
         layout.active = item.selected or s.selected_count == 0
-        row = layout.row(align=True)
+        if s.editing_type == 0:
+            row = layout.row(align=True)
+        else:
+            split = layout.split(factor=NAME_COLUMN_FACTOR)
+            row = split.row(align=True)
+            layout = split
 
         if s.editing_type == 0:
             row.prop(item, 'selected', text='', emboss=False,
