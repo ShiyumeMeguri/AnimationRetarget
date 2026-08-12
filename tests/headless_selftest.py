@@ -1454,6 +1454,72 @@ def phase_action_rename():
     addon.unregister()
 
 
+def phase_api():
+    print('\n== Phase 8: 稳定 API 门面 (供其他插件程序化调用) ==')
+    import json
+    api = __import__(PKG + '.api', fromlist=['x'])
+    skel = __import__(PKG + '.skeleton_rename', fromlist=['x'])
+
+    reset_blend()
+    src = build_armature('ApiSrc', SRC_BONES, location=(0.2, -0.1, 0.05),
+                         rotation=(0, 0, math.radians(10)), scale=0.01)
+    build_src_actions(src)
+    dst = build_armature('ApiDst', DST_BONES)
+    settings = {'frame_step': 1.0, 'interpolation': 'LINEAR',
+                'suffix': '_api', 'overwrite': True, 'bake_mode': 'PURE'}
+    results, errors = api.retarget_actions(
+        src, dst, base_spec()['mappings'], settings,
+        [bpy.data.actions['Walk']])
+    check('api.retarget_actions 无错误', not errors, str(errors))
+    check('api.retarget_actions 产出 1 条动作', len(results) == 1)
+    baked = bpy.data.actions.get('Walk_api')
+    check('api.retarget_actions 落了目标动作 Walk_api', baked is not None)
+    fp = _curve_fingerprint(baked) if baked else {}
+    spans = [max(co[1::2]) - min(co[1::2])
+             for (p, i), co in fp.items()
+             if p.startswith('pose.bones["Hips"]') and len(co) >= 4]
+    check('api 烘焙后目标骨 Hips 非常量 (max span=%.4f)'
+          % (max(spans) if spans else -1.0),
+          bool(spans) and max(spans) > 1e-4)
+
+    default_path = api.export_skeleton_structure(src)
+    check('api.export_skeleton_structure 默认落 SkeletonConfig 目录',
+          os.path.dirname(default_path) == skel.skeleton_export_dir()
+          and os.path.isfile(default_path))
+    with open(default_path, 'r', encoding='utf-8') as f:
+        doc = json.load(f)
+    check('导出 JSON 读侧字段齐 (format/version/bones)',
+          doc.get('format') == skel.SKELETON_FORMAT
+          and doc.get('version') == skel.SKELETON_VERSION
+          and isinstance(doc.get('bones'), list) and bool(doc['bones']))
+    custom = os.path.join(tempfile.mkdtemp(prefix='animret_api_'), 'skel.json')
+    got = api.export_skeleton_structure(src, custom)
+    check('api.export_skeleton_structure 尊重自定义 out_path',
+          got == custom and os.path.isfile(custom))
+
+    spec = base_spec()
+    name = '_selftest_api_mapping'
+    saved = presets_mod.save_preset(name, spec)
+    by_name = api.load_mapping(name)
+    by_path = api.load_mapping(saved)
+    check('load_mapping 预设名与绝对路径两种输入结果一致',
+          by_name == by_path and bool(by_name))
+    check('load_mapping 返回全部映射条数',
+          len(by_name) == len(spec['mappings']))
+    check('load_mapping 保留源/目标与每条附加参数 dict',
+          by_name[0][0] == 'hips' and by_name[0][1] == 'Hips'
+          and by_name[0][2].get('rot') is not None)
+    presets_mod.delete_preset(name)
+
+    fresh = __import__(PKG + '.api', fromlist=['x'])
+    check('AnimationRetarget.api 可 import 且入口齐全 (消费方 ImportError 探测契约)',
+          all(hasattr(fresh, entry) for entry in
+              ('retarget_actions', 'load_mapping', 'mapping_dir',
+               'export_skeleton_structure')))
+    check('api.mapping_dir 指向预设目录',
+          api.mapping_dir() == presets_mod.preset_dir())
+
+
 # ---------------------------------------------------------------------------
 
 def main():
@@ -1463,7 +1529,7 @@ def main():
                   phase_local_channel,
                   phase_bake, phase_empty_fcurves, phase_presets,
                   phase_operators, phase_skeleton_rename,
-                  phase_action_rename, phase_cli):
+                  phase_action_rename, phase_api, phase_cli):
         try:
             phase()
         except Exception:

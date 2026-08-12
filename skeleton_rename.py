@@ -143,9 +143,8 @@ def skeleton_export_path(armature_name):
                         presets.sanitize(armature_name) + '.json')
 
 
-def write_skeleton_export(obj):
-    """导出永远原地覆盖同名文件 — 只向前看, 不留旧档 (与映射预设同一哲学)。"""
-    path = skeleton_export_path(obj.name)
+def write_skeleton_export(obj, out_path=None):
+    path = out_path or skeleton_export_path(obj.name)
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(export_skeleton(obj), f, ensure_ascii=False, indent=2)
     return path
