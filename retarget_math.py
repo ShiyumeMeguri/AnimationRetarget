@@ -414,34 +414,98 @@ def _ortho_snap(q):
 
 
 def _solve_direction_alignment(pairs):
-    """把方向组 {v_dest} 转到 {v_src} 上的最小旋转 (闭式, 确定性)。
+    """加权方向组 {(v_dest, v_src, w)} 的全局最优对齐旋转 (Wahba 问题,
+    Davenport q-method: 最优四元数 = 4x4 增益矩阵 K 的最大特征向量,
+    对称幂迭代求出 — 固定种子固定上限, 完全确定性)。
 
-    主轴 = 两侧方向的归一化和 (rotation_difference); 剩余的绕主轴滚转
-    由 Σ 垂直分量对齐度的 atan2 极值闭式给出。0 约束 → 恒等;
-    1 约束 → 纯最小旋转 (垂直分量为零, 滚转守卫为 0);
-    对称扇形 (方向和为零) → 以首对为主轴。"""
+    任意约束配置都稳定: 单对 → 最小弧; 对称扇形 (骨盆 = 脊柱↑ + 双腿↓,
+    方向和近零 — 旧的"和向量当主轴"在这里被噪声劫持出任意大旋转, 正是
+    躯干 180° 翻转的根因) → 特征结构不经过和向量, 解仍是全局最优;
+    真简并 (全部共线) 时滚转分量无约束, 幂迭代给出确定的一个。
+    单约束的最优解族有一整维滚转自由度 — 那里的正确代表是零滚转,
+    即解析最小弧, 不进特征迭代 (种子会把噪声滚转留在简并维里)。"""
     if not pairs:
         return Quaternion()
-    sum_dest = Vector((0.0, 0.0, 0.0))
-    sum_src = Vector((0.0, 0.0, 0.0))
-    for v_dest, v_src in pairs:
-        sum_dest = sum_dest + v_dest
-        sum_src = sum_src + v_src
-    if sum_dest.length_squared < 1e-12 or sum_src.length_squared < 1e-12:
-        sum_dest, sum_src = pairs[0]
-    base = sum_dest.rotation_difference(sum_src)
-    axis = sum_src.normalized()
-    sin_sum = 0.0
-    cos_sum = 0.0
-    for v_dest, v_src in pairs:
-        turned = base @ v_dest
-        turned_perp = turned - axis * turned.dot(axis)
-        target_perp = v_src - axis * v_src.dot(axis)
-        cos_sum += turned_perp.dot(target_perp)
-        sin_sum += turned_perp.cross(target_perp).dot(axis)
-    if abs(sin_sum) < 1e-12 and abs(cos_sum) < 1e-12:
-        return base
-    return (Quaternion(axis, math.atan2(sin_sum, cos_sum)) @ base).normalized()
+    if len(pairs) == 1:
+        v_dest, v_src, _weight = pairs[0]
+        return v_dest.rotation_difference(v_src)
+    b00 = b01 = b02 = b10 = b11 = b12 = b20 = b21 = b22 = 0.0
+    weight_total = 0.0
+    for v_dest, v_src, weight in pairs:
+        weight_total += weight
+        b00 += weight * v_src.x * v_dest.x
+        b01 += weight * v_src.x * v_dest.y
+        b02 += weight * v_src.x * v_dest.z
+        b10 += weight * v_src.y * v_dest.x
+        b11 += weight * v_src.y * v_dest.y
+        b12 += weight * v_src.y * v_dest.z
+        b20 += weight * v_src.z * v_dest.x
+        b21 += weight * v_src.z * v_dest.y
+        b22 += weight * v_src.z * v_dest.z
+    if weight_total <= 0.0:
+        return Quaternion()
+    trace = b00 + b11 + b22
+    z0 = b12 - b21
+    z1 = b20 - b02
+    z2 = b01 - b10
+    shift = 2.0 * weight_total
+    matrix = [
+        [trace + shift, z0, z1, z2],
+        [z0, b00 + b00 - trace + shift, b01 + b10, b02 + b20],
+        [z1, b01 + b10, b11 + b11 - trace + shift, b12 + b21],
+        [z2, b02 + b20, b12 + b21, b22 + b22 - trace + shift],
+    ]
+    # 反复平方: M^(2^24) —— 有效幂 1.7e7, 特征值间隙再小也被碾平;
+    # 每轮按最大元素归一防溢出。真简并时收敛到简并子空间投影, 种子选出确定代表。
+    for _ in range(24):
+        squared = [[sum(matrix[r][t] * matrix[t][c] for t in range(4))
+                    for c in range(4)] for r in range(4)]
+        peak = max(abs(squared[r][c]) for r in range(4) for c in range(4))
+        if peak < 1e-300:
+            return Quaternion()
+        matrix = [[squared[r][c] / peak for c in range(4)] for r in range(4)]
+    seed = (1.0, 0.02, 0.013, 0.007)
+    q = tuple(sum(matrix[r][c] * seed[c] for c in range(4)) for r in range(4))
+    norm = math.sqrt(sum(component * component for component in q))
+    if norm < 1e-150:
+        return Quaternion()
+    solved = Quaternion((q[0] / norm, -q[1] / norm, -q[2] / norm, -q[3] / norm)).normalized()
+    return _strip_unconstrained_twist(solved, pairs)
+
+
+def _alignment_gain(rotation, pairs):
+    return sum(weight * (rotation @ v_dest).dot(v_src)
+               for v_dest, v_src, weight in pairs)
+
+
+def _strip_unconstrained_twist(solved, pairs):
+    """最优解族的最小角代表: 约束组共线 (rank-1, 现实骨架里 = 扭曲骨与主骨
+    同向) 时绕主轴的滚转是一整维简并, 幂迭代把种子噪声留在那一维里;
+    剥掉绕加权主轴的 twist, 仅当 Wahba 增益不降 (滚转确实无约束) 时采用。
+    判据是最优性本身, 不是几何阈值。增益余量按 Σw 取相对值: mathutils 是
+    float32, 复合噪声在 1e-7·Σw 量级, 而真被约束的滚转一剥就损失 1e-2·Σw
+    量级 — 1e-5·Σw 隔着三个数量级坐在中间。"""
+    principal = Vector((0.0, 0.0, 0.0))
+    weight_total = 0.0
+    for v_dest, v_src, weight in pairs:
+        weight_total += weight
+        principal = principal + v_src * (weight if principal.dot(v_src) >= 0.0
+                                         else -weight)
+    if principal.length_squared < 1e-24 or weight_total <= 0.0:
+        return solved
+    principal.normalize()
+    twist_scalar = (solved.x * principal.x + solved.y * principal.y
+                    + solved.z * principal.z)
+    twist = Quaternion((solved.w, twist_scalar * principal.x,
+                        twist_scalar * principal.y, twist_scalar * principal.z))
+    if twist.magnitude < 1e-12:
+        return solved
+    twist.normalize()
+    stripped = (twist.inverted() @ solved).normalized()
+    margin = 1e-5 * weight_total
+    if _alignment_gain(stripped, pairs) + margin >= _alignment_gain(solved, pairs):
+        return stripped
+    return solved
 
 
 def solve_reference_alignment(src_skel, dest_skel, index_pairs):
@@ -489,8 +553,11 @@ def solve_reference_alignment(src_skel, dest_skel, index_pairs):
             v_src = src_skel.rest_world_head(src_of[dc]) - head_src
             if v_dest.length_squared < 1e-14 or v_src.length_squared < 1e-14:
                 continue
+            # 权重 = 两侧偏移的较短者: 方向的置信度就是偏移长度 -- 毫米级
+            # 关节堆叠 (Pelvis 与根几乎重合) 的方向是安放噪声, 不配约束姿态
             pairs.append(((parent_rotation @ v_dest).normalized(),
-                          v_src.normalized()))
+                          v_src.normalized(),
+                          min(v_dest.length, v_src.length)))
         rotation = _solve_direction_alignment(pairs)
         acc = (rotation @ parent_rotation).normalized()
         accumulated[di] = acc
