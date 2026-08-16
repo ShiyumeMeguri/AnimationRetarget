@@ -554,7 +554,9 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
 
     spec: dict, 见 retarget_math.build_mappings; settings 键:
       frame_step / interpolation('LINEAR'|'BEZIER') / suffix / overwrite /
-      bake_mode('PURE'|'SCENE') / frame_start / frame_end / fake_user
+      bake_mode('PURE'|'SCENE') / frame_start / frame_end / fake_user /
+      animated_only(只重定向动作真正动了的骨: 未动骨的"静止姿势"在跨角色时经参考
+      对齐会产出常量歪角 -- 实测虹膜这类叶端小骨 72.8°, 而目标自己的 rest 才是对的)
     返回 (dest_action, info dict)。
     """
     settings = settings or {}
@@ -567,6 +569,14 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
     dest_skel = snapshot_skeleton(dest_obj)
     mappings, warnings = rm.build_mappings(src_skel, dest_skel,
                                            spec.get('mappings', []))
+    if settings.get('animated_only'):
+        provided = settings.get('animated_bones')
+        if provided is not None:
+            animated = set(provided)
+        else:
+            from . import skeleton_rename
+            animated = skeleton_rename.action_bone_names(action)
+        mappings = [m for m in mappings if m.src_name in animated]
     if not mappings:
         raise ValueError('没有有效映射, 无法烘焙')
     needed = [m.src_name for m in mappings]
