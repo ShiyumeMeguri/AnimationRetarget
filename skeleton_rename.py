@@ -179,6 +179,47 @@ def delete_rename_preset(name):
 # 的 Bone.name setter 联动维护, 见文件头说明, 这里不重复实现)
 # ---------------------------------------------------------------------------
 
+UNITY_RIG_PROP = 'ruri_unity_rig'
+
+
+def rewrite_rig_stamp(obj, name_map):
+    """把 Unity 骨架身份印记(RuriRipperImporter 导入时烙的 `ruri_unity_rig`)里的
+    骨名按 ``name_map`` 一起改掉。
+
+    那份印记是 {transform path: {"bone", "local"}},"从动画 clip 的曲线路径找到本骨架
+    哪根骨"全靠它。骨名是它自己存的一份普通字符串,**引擎的改名联动管不到**
+    (引擎只联动顶点组 / FCurve 路径 / 约束 subtarget),所以改完名不同步这一份,
+    以后按 clip 路径加载动画就会找不到骨头。
+
+    这是改名动作自己的收尾, 不是印记该防的事 —— 在这个工具里改名就顺手改掉;
+    绕过这个工具手动改名, 那份印记就得用户自己负责。
+
+    返回改写的条目数; 骨架没有这份印记时返回 0。
+    """
+    raw = obj.get(UNITY_RIG_PROP)
+    if not raw:
+        return 0
+    try:
+        document = json.loads(str(raw))
+        paths = document['paths']
+    except (ValueError, KeyError, TypeError):
+        return 0
+    if not isinstance(paths, dict):
+        return 0
+    changed = 0
+    for entry in paths.values():
+        if not isinstance(entry, dict):
+            continue
+        new = name_map.get(entry.get('bone'))
+        if new is not None and new != entry.get('bone'):
+            entry['bone'] = new
+            changed += 1
+    if changed:
+        document['paths'] = paths
+        obj[UNITY_RIG_PROP] = json.dumps(document, separators=(',', ':'))
+    return changed
+
+
 def apply_rename(obj, pairs):
     """pairs: [(old, new), ...]。
 
@@ -217,10 +258,13 @@ def apply_rename(obj, pairs):
         if b.name != new:
             collided.append((old, new, b.name))
 
+    rig_stamp = rewrite_rig_stamp(obj, rename_map)
+
     return {
         'renamed': sorted(rename_map.items()),
         'missing': missing,
         'collided': collided,
+        'rig_stamp': rig_stamp,
     }
 
 
