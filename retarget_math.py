@@ -32,8 +32,8 @@ BKE_bone_parent_transform_calc_from_matrices / _apply (armature.cc),
 "源骨架处于 rest 时目标骨架该摆成什么样"。这个姿态由 solve_reference_alignment
 从两侧 rest 的关节几何直接解出 (把目标骨架虚拟地摆成源 rest 的样子), 因此
 A-pose ↔ T-pose 等任意 rest 约定差异被逐骨自动解掉, 无需人工干预; 两侧约定
-一致时解严格退化为自身 rest, 同构骨架的行为逐位不变。手动偏移叠加其上, 在目标
-骨架上按层级 FK 求值 —— 转父骨会带动整条子链。
+一致时解严格退化为自身 rest, 同构骨架的行为逐位不变。手动偏移叠加其上, 缺省只影响
+被偏移的那根骨; 关掉 self_only 才按层级 FK 求值、带着整条子链一起转。
 
 配置里**只记录关系, 不记录骨骼的固有数据**: 一行映射说的是"这根骨对应那根骨"
 外加一个相对偏移。朝向是每次从两侧活 rest 现算的, 所以同一份表对任何骨架、任何
@@ -589,37 +589,57 @@ def _manual_offset(rot_spec):
 
 
 def _reference_corrections(dest_skel, rot_by_dest, auto_references):
-    """手动偏移在目标骨架上按层级 FK 求值 → {骨索引: 相对自身参考朝向的修正}。
+    """手动偏移在目标骨架上按 FK 求值 → {骨索引: 相对自身参考朝向的修正}。
 
-    偏移因此等价于"在姿态模式里绕自身轴向转这根骨": 整条子链跟着转 —— 与
-    "捕捉对齐姿态"同一语义 (对齐捕捉的本就是一个真实姿态, 天然带层级)。
-    偏移骑在自动解出的参考姿态上, 与 build_mappings 取 dest_ref 的规则一致。
-    没有任何手动偏移时返回空表。
+    偏移等价于"在姿态模式里绕自身轴向转这根骨"。**转出去的这一下要不要带着子链一起走,
+    由每行的 ``self_only`` 说了算, 缺省是不带 (只影响这根骨本身)。**
+
+    两种都得有, 因为它们回答的是两个不同的问题:
+
+    * 只影响自身 (缺省): 这根骨的 rest 轴向跟对面不是一个约定, 要单独掰正。掰的是
+      *它自己*的对应关系 —— 前臂、手掌各有各的约定, 不该被上臂掰的那一下连累。
+      给上臂 Y 转 90° 却看见整条手臂都转了 90°, 就是这个缺省要消除的意外。
+    * 带着子链 (关掉 self_only): 整段肢体的朝向约定成体系地偏了一个角度, 一次转到位。
+
+    实现是两遍 FK: ``pose_chain`` 只含带子链的那些偏移, 子孙从它身上继承; ``pose_self``
+    含全部偏移, 只供偏移骨自己取值。没有任何 self_only 偏移时两遍逐位相同, 于是行为
+    与只有层级偏移的旧配置逐位不变。没有任何手动偏移时直接返回空表 (空态零成本)。
     """
     aligns = dict(auto_references)
-    offsets = {}
+    offsets, chained = {}, {}
     for di, rot_spec in rot_by_dest.items():
         q = _manual_offset(rot_spec)
-        if q is not None:
-            offsets[di] = q
+        if q is None:
+            continue
+        offsets[di] = q
+        if not rot_spec.get('self_only', True):
+            chained[di] = q
     if not offsets:
         return {}
 
-    # 对齐姿态先还原成各骨的 basis, 手动偏移再按骨骼自身轴向后乘上去
-    _pose, bases = _apply_targets(dest_skel, aligns, {})
-    for i, q in offsets.items():
-        local = q.to_matrix().to_4x4()
-        base = bases.get(i)
-        bases[i] = base @ local if base is not None else local
-    pose = fk_pose(dest_skel, bases)
+    def posed_by(applied):
+        # 参考姿态先还原成各骨的 basis, 手动偏移再按骨骼自身轴向后乘上去
+        _pose, bases = _apply_targets(dest_skel, aligns, {})
+        for i, q in applied.items():
+            local = q.to_matrix().to_4x4()
+            base = bases.get(i)
+            bases[i] = base @ local if base is not None else local
+        return fk_pose(dest_skel, bases)
+
+    pose_chain = posed_by(chained)
+    pose_self = pose_chain if len(chained) == len(offsets) else posed_by(offsets)
 
     out = {}
     for di in rot_by_dest:
-        i = di
-        while i >= 0 and i not in offsets:
-            i = dest_skel.bones[i].parent
-        if i < 0:          # 自身与全部祖先都没偏移 → 参考朝向原样不动
-            continue
+        if di in offsets:
+            pose = pose_self            # 自己那一下, 两种偏移都算数
+        else:
+            i = dest_skel.bones[di].parent
+            while i >= 0 and i not in chained:
+                i = dest_skel.bones[i].parent
+            if i < 0:      # 自身没偏移, 祖先也没有"带子链"的偏移 → 参考朝向原样不动
+                continue
+            pose = pose_chain
         ref = aligns[di] if di in aligns else dest_skel.rest_world_rot(di)
         posed = dest_skel.world_rot @ rot_of(pose[di])
         out[di] = (ref.inverted() @ posed).normalized()
@@ -631,7 +651,7 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
 
     mapping dict 结构 (与 JSON 预设一致):
       {"source": str, "dest": str,
-       "rot": {"auto": bool, "ortho": bool, "offset": [x,y,z]},
+       "rot": {"auto": bool, "ortho": bool, "offset": [x,y,z], "self_only": bool},
        "loc": {"enabled": bool, "axes": [bool*3], "scale_mode": "NONE|AUTO|MANUAL", "scale": float},
        "ik":  {"enabled": bool, "influence": float, "chain": int}}
     返回 (mappings, warnings)。无效映射跳过并记录警告。

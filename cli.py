@@ -163,6 +163,7 @@ def spec_from_idprops(arm_data):
             'rot': {
                 'auto': bool(it.get('rot_auto', 1)),
                 'ortho': bool(it.get('rot_ortho', 0)),
+                'self_only': bool(it.get('rot_self_only', 1)),
                 'offset': list(it.get('rot_offset', (0.0, 0.0, 0.0))),
             },
         }

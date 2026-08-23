@@ -132,8 +132,14 @@ class AnimRetMapping(bpy.types.PropertyGroup):
     rot_offset: bpy.props.FloatVectorProperty(
         name='手动偏移', subtype='EULER', size=3, default=(0.0, 0.0, 0.0),
         description='在自动偏移基础上追加的手动旋转修正\n'
-                    '等同于在姿态模式里绕该骨自身轴向转动它: 整条子链跟着转\n'
+                    '等同于在姿态模式里绕该骨自身轴向转动它\n'
                     '朝向本身每次从两侧活 rest 现算, 配置里只记这个相对偏移',
+        override={'LIBRARY_OVERRIDABLE'}, update=_on_mapping_edit)
+    rot_self_only: bpy.props.BoolProperty(
+        name='仅本骨', default=True,
+        description='手动偏移只影响这根骨, 不带着子骨一起转\n'
+                    '关掉则整条子链跟着转 (整段肢体的朝向约定成体系地偏了时用)\n'
+                    '例: 给上臂 Y 转 90°, 开着只有上臂动; 关掉则前臂手掌一起转 90°',
         override={'LIBRARY_OVERRIDABLE'}, update=_on_mapping_edit)
 
     # --- 位移 ---
@@ -201,6 +207,7 @@ class AnimRetMapping(bpy.types.PropertyGroup):
                 'auto': self.rot_auto,
                 'ortho': self.rot_ortho,
                 'offset': list(self.rot_offset),
+                'self_only': self.rot_self_only,
             },
         }
         if self.loc_enabled:
@@ -226,6 +233,7 @@ class AnimRetMapping(bpy.types.PropertyGroup):
         rot = d.get('rot', {})
         self['rot_auto'] = bool(rot.get('auto', True))
         self['rot_ortho'] = bool(rot.get('ortho', False))
+        self['rot_self_only'] = bool(rot.get('self_only', True))
         self['rot_offset'] = list(rot.get('offset', (0.0, 0.0, 0.0)))
         loc = d.get('loc', {})
         self['loc_enabled'] = bool(loc.get('enabled', False))

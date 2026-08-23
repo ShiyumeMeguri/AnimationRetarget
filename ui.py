@@ -59,6 +59,7 @@ class ANIMRET_UL_mappings(bpy.types.UIList):
             sub = layout.row(align=True)
             if item.rot_auto:
                 sub.prop(item, 'rot_ortho', text='正交', toggle=True)
+            sub.prop(item, 'rot_self_only', text='仅本骨', toggle=True)
             sub.prop(item, 'rot_offset', text='')
         elif s.editing_type == 2:
             row.prop(item, 'loc_enabled', icon='CON_LOCLIKE', icon_only=True)

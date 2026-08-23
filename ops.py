@@ -147,7 +147,7 @@ class ANIMRET_OT_push_nla(_StateOperator, bpy.types.Operator):
 
 # 各标签页负责的属性 —— 恢复默认时按页只重置这些, 不碰别的页
 _TAB_PROPS = {
-    1: ('rot_auto', 'rot_ortho', 'rot_offset'),
+    1: ('rot_auto', 'rot_ortho', 'rot_offset', 'rot_self_only'),
     2: ('loc_enabled', 'loc_axes', 'loc_scale_mode', 'loc_scale'),
     3: ('ik_enabled', 'ik_influence', 'ik_chain'),
 }

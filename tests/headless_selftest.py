@@ -541,10 +541,10 @@ LEG_PAIRS = [('Thigh', 'UpperLeg'), ('ThighTwist', 'UpperLegTwists'),
              ('Calf', 'LowerLeg'), ('AnkleS', 'Ankle')]
 
 
-def leg_spec(offset=(0.0, 0.0, 0.0)):
-    """偏移只挂在 UpperLeg 上 — 子链是否跟着转就是被测行为。"""
+def leg_spec(offset=(0.0, 0.0, 0.0), self_only=True):
+    """偏移只挂在 UpperLeg 上 — 子链跟不跟着转就是被测行为。"""
     return [{'source': s, 'dest': d,
-             'rot': {'auto': True, 'ortho': False,
+             'rot': {'auto': True, 'ortho': False, 'self_only': self_only,
                      'offset': list(offset) if d == 'UpperLeg' else [0, 0, 0]}}
             for s, d in LEG_PAIRS]
 
@@ -577,13 +577,22 @@ def phase_manual_offset():
     check('腿部映射无警告', not warns, str(warns))
 
     ang = math.radians(25)
+    CHAIN = ('UpperLeg', 'UpperLegTwists', 'LowerLeg', 'Ankle')
     for label, off in (('摆 X', (ang, 0, 0)), ('扭 Y', (0, ang, 0)),
                        ('侧 Z', (0, 0, ang))):
+        # self_only=False: 老语义, 整条子链跟着转
+        cur, _m, _w = leg_solve(src, dst, leg_spec(off, self_only=False))
+        err = max(abs(quat_angle(base[n][0], cur[n][0]) - ang) for n in CHAIN)
+        check('偏移%s 关掉"仅本骨": 整条子链同步转 25° (最大偏差 %.2e rad)'
+              % (label, err), err < 1e-4)
+
+        # 缺省 self_only=True: 只有被偏移的那根骨动, 子骨一动不动
         cur, _m, _w = leg_solve(src, dst, leg_spec(off))
-        err = max(abs(quat_angle(base[n][0], cur[n][0]) - ang)
-                  for n in ('UpperLeg', 'UpperLegTwists', 'LowerLeg', 'Ankle'))
-        check('偏移%s: 整条子链同步转 25° (最大偏差 %.2e rad)' % (label, err),
-              err < 1e-4)
+        own = abs(quat_angle(base['UpperLeg'][0], cur['UpperLeg'][0]) - ang)
+        kids = max(quat_angle(base[n][0], cur[n][0]) for n in CHAIN[1:])
+        check('偏移%s 仅本骨: 自己转 25° (偏差 %.2e rad)' % (label, own), own < 1e-4)
+        check('偏移%s 仅本骨: 子骨纹丝不动 (最大 %.2e rad)' % (label, kids),
+              kids < 1e-6)
 
     src_skel = core.snapshot_skeleton(src)
     dest_skel = core.snapshot_skeleton(dst)
