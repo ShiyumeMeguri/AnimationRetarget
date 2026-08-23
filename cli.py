@@ -164,8 +164,6 @@ def spec_from_idprops(arm_data):
                 'auto': bool(it.get('rot_auto', 1)),
                 'ortho': bool(it.get('rot_ortho', 0)),
                 'offset': list(it.get('rot_offset', (0.0, 0.0, 0.0))),
-                'align': list(it.get('align_rot'))
-                if it.get('align_set') and it.get('align_rot') else None,
             },
         }
         if it.get('loc_enabled'):

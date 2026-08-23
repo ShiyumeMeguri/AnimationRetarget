@@ -15,6 +15,7 @@
 
 import bpy
 
+from . import compose
 from . import presets
 from .state import (get_state, get_dest_object, resolve_dest_object,
                     mapping_matches)
@@ -59,8 +60,6 @@ class ANIMRET_UL_mappings(bpy.types.UIList):
             if item.rot_auto:
                 sub.prop(item, 'rot_ortho', text='正交', toggle=True)
             sub.prop(item, 'rot_offset', text='')
-            sub.label(icon='ORIENTATION_GIMBAL' if item.align_set
-                      else 'BLANK1')
         elif s.editing_type == 2:
             row.prop(item, 'loc_enabled', icon='CON_LOCLIKE', icon_only=True)
             row.label(text=item.dest, translate=False)
@@ -96,17 +95,51 @@ class ANIMRET_UL_mappings(bpy.types.UIList):
 
 
 class ANIMRET_MT_presets(bpy.types.Menu):
-    bl_label = '映射预设'
+    bl_label = '映射配置'
 
     def draw(self, context):
         layout = self.layout
-        items = presets.list_all_presets()
-        if not items:
-            layout.label(text='(没有预设, 用右侧按钮保存)')
-            return
-        for label, name in items:
-            layout.operator('animret.preset_load', text=label,
-                            translate=False).name = name
+        edges = compose.load_edges()
+        routed = compose.routes(edges)
+        counted = {}
+        for route in routed:
+            spec = compose.compose(route, edges)
+            counted[route.key] = len(presets.normalize_pairs(spec))
+        alive = [route for route in routed if counted[route.key]]
+
+        if alive:
+            layout.label(text='转换 (%d 个家族张成 %d 对)'
+                              % (len(compose.families(edges)), len(alive)),
+                         icon='DECORATE_LINKED')
+            for route in alive:
+                op = layout.operator('animret.preset_load',
+                                     text=route.label(counted[route.key]),
+                                     translate=False,
+                                     icon='FILE_TICK' if route.direct else 'PLUS')
+                op.route = route.key
+                op.name = ''
+            dropped = [route for route in routed if not counted[route.key]]
+            if dropped:
+                # 拼得通、但中间骨架把行 join 光了。说出来, 别让它看起来不存在。
+                layout.label(text='(%d 对拼得通但没剩下映射: %s)'
+                                  % (len(dropped),
+                                     ', '.join(r.key for r in dropped[:3])),
+                             icon='INFO')
+
+        # 没声明两侧家族的配置上不了图, 但仍然是能直接加载的文件。
+        edge_names = {name for name, _spec, _s, _d in edges}
+        loose = [(label, name) for label, name in presets.list_all_presets()
+                 if name not in edge_names]
+        if loose:
+            layout.separator()
+            layout.label(text='未声明骨架家族 (不参与组合)', icon='FILE_BLANK')
+            for label, name in loose:
+                op = layout.operator('animret.preset_load', text=label,
+                                     translate=False)
+                op.name = name
+                op.route = ''
+        if not alive and not loose:
+            layout.label(text='(没有配置, 用右侧按钮保存)')
 
 
 class ANIMRET_MT_settings(bpy.types.Menu):
@@ -137,8 +170,6 @@ class ANIMRET_MT_align(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator('animret.capture_align', icon='ARMATURE_DATA')
-        layout.operator('animret.clear_align', icon='X')
 
 
 def _draw_mapping_block(layout):
@@ -181,15 +212,27 @@ def _draw_mapping_block(layout):
     left.template_list('ANIMRET_UL_mappings', '', s, 'mappings', s,
                        'active_mapping', rows=7)
 
-    box = left.box().row(align=True)
+    holder = left.box()
+    box = holder.row(align=True)
     box.menu(ANIMRET_MT_presets.__name__,
-             text=s.active_preset or '映射预设', translate=False,
+             text=s.active_preset or s.active_route or '映射配置', translate=False,
              icon='PRESET')
-    box.operator('animret.preset_save', text='', icon='FILE_TICK')
+    saveable = box.row(align=True)
+    # 拼出来的通路没有对应文件, "保存"无处可覆盖 —— 只能另存为。
+    saveable.enabled = bool(s.active_preset)
+    saveable.operator('animret.preset_save', text='', icon='FILE_TICK')
     box.operator('animret.preset_save_as', text='', icon='ADD')
-    box.operator('animret.preset_delete', text='', icon='REMOVE')
+    removable = box.row(align=True)
+    removable.enabled = bool(s.active_preset)
+    removable.operator('animret.preset_delete', text='', icon='REMOVE')
     box.separator()
     box.operator('animret.preset_open_folder', text='', icon='FILE_FOLDER')
+    if s.active_route and not s.active_preset:
+        holder.label(text='组合出来的, 还没有文件 —— 另存为即可固化', icon='PLUS')
+    families = holder.row(align=True)
+    families.prop(s, 'source_family', text='')
+    families.label(icon='FORWARD')
+    families.prop(s, 'dest_family', text='')
 
     right = row.column(align=True)
     right.separator()

@@ -32,9 +32,14 @@ BKE_bone_parent_transform_calc_from_matrices / _apply (armature.cc),
 "源骨架处于 rest 时目标骨架该摆成什么样"。这个姿态由 solve_reference_alignment
 从两侧 rest 的关节几何直接解出 (把目标骨架虚拟地摆成源 rest 的样子), 因此
 A-pose ↔ T-pose 等任意 rest 约定差异被逐骨自动解掉, 无需人工干预; 两侧约定
-一致时解严格退化为自身 rest, 同构骨架的行为逐位不变。用户捕捉的"对齐姿态"
-覆盖自动解 (人工陈述优先); 手动偏移再叠加其上。手动偏移与对齐姿态同语义,
-都在目标骨架上按层级 FK 求值 —— 转父骨会带动整条子链。
+一致时解严格退化为自身 rest, 同构骨架的行为逐位不变。手动偏移叠加其上, 在目标
+骨架上按层级 FK 求值 —— 转父骨会带动整条子链。
+
+配置里**只记录关系, 不记录骨骼的固有数据**: 一行映射说的是"这根骨对应那根骨"
+外加一个相对偏移。朝向是每次从两侧活 rest 现算的, 所以同一份表对任何骨架、任何
+rest 约定都成立, 改名或重指向骨骼都不会让它失效。曾经存在过一个"捕捉对齐姿态"
+——把目标骨的世界朝向快照进配置并**压过自动解**——它在骨架被重指向后就指向一个
+该骨已经没有的朝向, 不报错、只错位, 而且分不清"过期"还是"故意"。已删除。
 
 位移传递 (根骨骼/武器):
     p' = origin_dest + (p_src_world - origin_src) * scale   (按世界轴向掩码混合)
@@ -588,15 +593,12 @@ def _reference_corrections(dest_skel, rot_by_dest, auto_references):
 
     偏移因此等价于"在姿态模式里绕自身轴向转这根骨": 整条子链跟着转 —— 与
     "捕捉对齐姿态"同一语义 (对齐捕捉的本就是一个真实姿态, 天然带层级)。
-    偏移骑在参考姿态上: 自动解出的对齐 + 用户捕捉的覆盖, 与 build_mappings
-    取 dest_ref 的规则一致。没有任何手动偏移时返回空表。
+    偏移骑在自动解出的参考姿态上, 与 build_mappings 取 dest_ref 的规则一致。
+    没有任何手动偏移时返回空表。
     """
     aligns = dict(auto_references)
     offsets = {}
     for di, rot_spec in rot_by_dest.items():
-        align = rot_spec.get('align')
-        if align:
-            aligns[di] = Quaternion(align).normalized()
         q = _manual_offset(rot_spec)
         if q is not None:
             offsets[di] = q
@@ -629,7 +631,7 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
 
     mapping dict 结构 (与 JSON 预设一致):
       {"source": str, "dest": str,
-       "rot": {"auto": bool, "ortho": bool, "offset": [x,y,z], "align": null|[w,x,y,z]},
+       "rot": {"auto": bool, "ortho": bool, "offset": [x,y,z]},
        "loc": {"enabled": bool, "axes": [bool*3], "scale_mode": "NONE|AUTO|MANUAL", "scale": float},
        "ik":  {"enabled": bool, "influence": float, "chain": int}}
     返回 (mappings, warnings)。无效映射跳过并记录警告。
@@ -663,12 +665,7 @@ def build_mappings(src_skel, dest_skel, mapping_dicts):
         q = Quaternion()
         if rot.get('auto', True):
             src_rest = src_skel.rest_world_rot(si)
-            align = rot.get('align')
-            if align:
-                dest_ref = Quaternion(align)  # 捕捉对齐时已存为世界空间
-            else:
-                dest_ref = auto_references[di]
-            q = src_rest.inverted() @ dest_ref
+            q = src_rest.inverted() @ auto_references[di]
             if rot.get('ortho', False):
                 q = _ortho_snap(q)
         correction = corrections.get(di)

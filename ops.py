@@ -19,6 +19,7 @@ import os
 import bpy
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
+from . import compose
 from . import core
 from . import presets
 from .state import (get_state, get_dest_object, setup_root_loc,
@@ -146,7 +147,7 @@ class ANIMRET_OT_push_nla(_StateOperator, bpy.types.Operator):
 
 # 各标签页负责的属性 —— 恢复默认时按页只重置这些, 不碰别的页
 _TAB_PROPS = {
-    1: ('rot_auto', 'rot_ortho', 'rot_offset', 'align_set', 'align_rot'),
+    1: ('rot_auto', 'rot_ortho', 'rot_offset'),
     2: ('loc_enabled', 'loc_axes', 'loc_scale_mode', 'loc_scale'),
     3: ('ik_enabled', 'ik_influence', 'ik_chain'),
 }
@@ -514,47 +515,6 @@ class ANIMRET_OT_guess_mapping(_StateOperator, bpy.types.Operator):
 
 
 # ---------------------------------------------------------------------------
-# 对齐姿态
-# ---------------------------------------------------------------------------
-
-class ANIMRET_OT_capture_align(_StateOperator, bpy.types.Operator):
-    bl_idname = 'animret.capture_align'
-    bl_label = '捕捉对齐姿态'
-    bl_description = ('先把目标骨架摆成与来源骨架 rest 相同的姿势 (如 A-pose 对 T-pose),'
-                      '\n然后对所选映射捕捉该姿态作为旋转参考 — 之后传递的是动作增量')
-    bl_options = {'UNDO'}
-
-    def execute(self, context):
-        s = get_state(context)
-        dest = get_dest_object(context)
-        n = 0
-        for i in s.get_selection():
-            m = s.mappings[i]
-            pb = dest.pose.bones.get(m.dest)
-            if pb is None:
-                continue
-            q = (dest.matrix_world @ pb.matrix).decompose()[1]
-            m.align_rot = (q.w, q.x, q.y, q.z)
-            m.align_set = True
-            n += 1
-        self.report({'INFO'}, '已为 %d 条映射捕捉对齐姿态' % n)
-        return {'FINISHED'}
-
-
-class ANIMRET_OT_clear_align(_StateOperator, bpy.types.Operator):
-    bl_idname = 'animret.clear_align'
-    bl_label = '清除对齐姿态'
-    bl_description = '清除所选映射的对齐姿态, 回到以 rest 为参考'
-    bl_options = {'UNDO'}
-
-    def execute(self, context):
-        s = get_state(context)
-        for i in s.get_selection():
-            s.mappings[i].align_set = False
-        return {'FINISHED'}
-
-
-# ---------------------------------------------------------------------------
 # 预设
 # ---------------------------------------------------------------------------
 
@@ -593,23 +553,52 @@ class ANIMRET_OT_preset_save_as(_StateOperator, bpy.types.Operator):
             return {'CANCELLED'}
         s = get_state(context)
         name = presets.sanitize(self.name)
-        path = presets.save_preset(name, s.to_spec(get_dest_object(context)))
+        spec = s.to_spec(get_dest_object(context))
+        path = presets.save_preset(name, spec)
         s.active_preset = name
-        self.report({'INFO'}, '已保存预设: %s' % path)
+        # 存下来就有文件了, 不再是"拼出来的"; 声明了两侧家族的话, 它自己也成了
+        # 转换图上的一条新边, 下次枚举时能给别人当跳板。
+        s.active_route = ''
+        edge = ' —— 已成为转换图上的一条边' if spec.get('skeletons') else (
+            ' (没填骨架家族, 不会出现在组合里)')
+        self.report({'INFO'}, '已保存预设: %s%s' % (path, edge))
         return {'FINISHED'}
 
 
 class ANIMRET_OT_preset_load(_StateOperator, bpy.types.Operator):
     bl_idname = 'animret.preset_load'
-    bl_label = '加载预设'
-    bl_description = ('加载预设到当前目标骨架\n'
-                      '骨架改名表也能直接当映射用 (两种配置通用)')
+    bl_label = '加载配置'
+    bl_description = ('加载一份配置到当前目标骨架\n'
+                      '骨架改名表也能直接当映射用 (两种配置通用)\n'
+                      '组合出来的通路一样能加载、改 offset, 再另存为独立文件')
     bl_options = {'UNDO'}
 
     name: bpy.props.StringProperty()
+    route: bpy.props.StringProperty()
 
     def execute(self, context):
         s = get_state(context)
+        if self.route:
+            source, _sep, dest = self.route.partition('>')
+            found = compose.route_for(source, dest)
+            if found is None:
+                self.report({'ERROR'}, '这条通路已经不在了 (配置被改过?), 刷新一下')
+                return {'CANCELLED'}
+            spec = compose.compose(found)
+            if not spec.get('mappings'):
+                self.report({'ERROR'}, '%s 拼出来一条映射都不剩 —— 中间骨架接不上'
+                            % found.label())
+                return {'CANCELLED'}
+            s.from_spec(spec, context)
+            # 直连就是那份文件本身, 可以照常"保存"; 拼出来的没有文件, 只能另存为。
+            s.active_preset = found.hops[0].name if (found.direct
+                                                     and not found.hops[0].flipped) else ''
+            s.active_route = found.key
+            self.report({'INFO'}, '已加载 %s (%d 条映射)%s' % (
+                found.label(), len(s.mappings),
+                '' if found.direct else ' —— 经 %s 拼成, 另存为可固化' % found.via))
+            return {'FINISHED'}
+
         try:
             spec = presets.load_preset(self.name)
         except Exception as e:
@@ -617,6 +606,7 @@ class ANIMRET_OT_preset_load(_StateOperator, bpy.types.Operator):
             return {'CANCELLED'}
         s.from_spec(spec, context)
         s.active_preset = self.name
+        s.active_route = ''
         self.report({'INFO'}, '已加载预设 %s (%d 条映射)' %
                     (self.name, len(s.mappings)))
         return {'FINISHED'}
@@ -712,8 +702,6 @@ classes = (
     ANIMRET_OT_name_mapping_reverse,
     ANIMRET_OT_mirror_mapping,
     ANIMRET_OT_guess_mapping,
-    ANIMRET_OT_capture_align,
-    ANIMRET_OT_clear_align,
     ANIMRET_OT_preset_save,
     ANIMRET_OT_preset_save_as,
     ANIMRET_OT_preset_load,

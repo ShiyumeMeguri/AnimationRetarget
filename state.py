@@ -133,14 +133,7 @@ class AnimRetMapping(bpy.types.PropertyGroup):
         name='手动偏移', subtype='EULER', size=3, default=(0.0, 0.0, 0.0),
         description='在自动偏移基础上追加的手动旋转修正\n'
                     '等同于在姿态模式里绕该骨自身轴向转动它: 整条子链跟着转\n'
-                    '与"捕捉对齐姿态"同一语义 (都在描述目标骨架的参考姿态)',
-        override={'LIBRARY_OVERRIDABLE'}, update=_on_mapping_edit)
-    align_set: bpy.props.BoolProperty(
-        default=False, override={'LIBRARY_OVERRIDABLE'},
-        description='是否已捕捉对齐姿态', update=_on_mapping_edit)
-    align_rot: bpy.props.FloatVectorProperty(
-        size=4, default=(1.0, 0.0, 0.0, 0.0),
-        description='对齐姿态下目标骨的世界旋转 (wxyz)',
+                    '朝向本身每次从两侧活 rest 现算, 配置里只记这个相对偏移',
         override={'LIBRARY_OVERRIDABLE'}, update=_on_mapping_edit)
 
     # --- 位移 ---
@@ -208,7 +201,6 @@ class AnimRetMapping(bpy.types.PropertyGroup):
                 'auto': self.rot_auto,
                 'ortho': self.rot_ortho,
                 'offset': list(self.rot_offset),
-                'align': list(self.align_rot) if self.align_set else None,
             },
         }
         if self.loc_enabled:
@@ -235,10 +227,6 @@ class AnimRetMapping(bpy.types.PropertyGroup):
         self['rot_auto'] = bool(rot.get('auto', True))
         self['rot_ortho'] = bool(rot.get('ortho', False))
         self['rot_offset'] = list(rot.get('offset', (0.0, 0.0, 0.0)))
-        align = rot.get('align')
-        self['align_set'] = align is not None
-        if align:
-            self['align_rot'] = list(align)
         loc = d.get('loc', {})
         self['loc_enabled'] = bool(loc.get('enabled', False))
         self['loc_axes'] = list(loc.get('axes', (True, True, True)))
@@ -283,9 +271,19 @@ class AnimRetState(bpy.types.PropertyGroup):
 
     mappings: bpy.props.CollectionProperty(
         type=AnimRetMapping, override={'LIBRARY_OVERRIDABLE', 'USE_INSERTION'})
+    # 派生, 不是存量: 开着同步时, 列表高亮的那一行**就是**当前活动骨骼所在的行。
+    #
+    # 反过来 (视图选骨 → 列表跟着走) 没有可靠的推送机制可用: 实测把活动骨骼换掉
+    # **不会**给依赖图打标记 (depsgraph_update_post 零次), 所以处理器接不到;
+    # msgbus 在 --background 里根本不投递, 也就无法验收。而"读"是随时能读的 ——
+    # 面板每次重绘都会问一遍这个 getter, 视图里选骨本来就会触发重绘, 于是同步是
+    # 免费且必然发生的, 不需要任何回调, 也不需要从 draw 里往数据里写东西。
+    stored_mapping: bpy.props.IntProperty(default=-1,
+                                           override={'LIBRARY_OVERRIDABLE'})
     active_mapping: bpy.props.IntProperty(
         default=-1, override={'LIBRARY_OVERRIDABLE'},
-        update=lambda self, ctx: self.update_active(ctx))
+        get=lambda self: self.get_active_mapping(),
+        set=lambda self, value: self.set_active_mapping(value))
     selected_count: bpy.props.IntProperty(
         default=0, override={'LIBRARY_OVERRIDABLE'})
 
@@ -302,8 +300,9 @@ class AnimRetState(bpy.types.PropertyGroup):
         description='实时预览重定向效果 (纯计算, 不创建约束, 关闭即完全复原)',
         override={'LIBRARY_OVERRIDABLE'}, update=_on_preview_toggle)
     sync_select: bpy.props.BoolProperty(
-        default=False, name='同步选择',
-        description='点击列表项时自动激活相应骨骼; 勾选列表项时自动选中相应骨骼',
+        default=False, name='点列表时同时选骨',
+        description='点击列表项时自动激活相应骨骼; 勾选列表项时自动选中相应骨骼\n'
+                    '(反方向一直是开的: 在视图里选中某根骨, 列表自动跳到那一行)',
         override={'LIBRARY_OVERRIDABLE'})
 
     # --- 烘焙设置 ---
@@ -341,11 +340,63 @@ class AnimRetState(bpy.types.PropertyGroup):
     active_preset: bpy.props.StringProperty(
         default='', description='当前加载的预设名 ("保存"按钮直接覆盖此预设)',
         override={'LIBRARY_OVERRIDABLE'})
+    # 拼出来的组合没有对应文件, 所以"保存"无处可覆盖 —— 这里记的是它是哪一条通路,
+    # 面板据此显示名字并把"保存"换成"另存为"。存下来之后它就有文件了, 这一项清空。
+    active_route: bpy.props.StringProperty(
+        default='', description='当前加载的组合通路 (源家族 → 目标家族)',
+        override={'LIBRARY_OVERRIDABLE'})
+    source_family: bpy.props.StringProperty(
+        name='源骨架家族', default='',
+        description='这份配置的来源骨架属于哪个家族 (逗号分隔可写多个别名)\n'
+                    '声明了两侧家族的配置才是转换图上的一条边, 才能被别的配置当跳板',
+        override={'LIBRARY_OVERRIDABLE'})
+    dest_family: bpy.props.StringProperty(
+        name='目标骨架家族', default='',
+        description='这份配置的目标骨架属于哪个家族 (逗号分隔可写多个别名)',
+        override={'LIBRARY_OVERRIDABLE'})
 
     # ------------------------------------------------------------------
-    def update_active(self, context):
-        if self.sync_select and 0 <= self.active_mapping < len(self.mappings):
-            m = self.mappings[self.active_mapping]
+    def row_of_bone(self, bone_name):
+        """哪一行说的是这根骨。目标骨优先 —— offset 是加在目标骨上的, 用户在视图里
+        点的也是那副骨架。找不到返回 -1。"""
+        if not bone_name:
+            return -1
+        for index, mapping in enumerate(self.mappings):
+            if mapping.dest == bone_name:
+                return index
+        for index, mapping in enumerate(self.mappings):
+            if mapping.source == bone_name:
+                return index
+        return -1
+
+    def get_active_mapping(self):
+        """高亮的就是**当前活动骨骼那一行** —— 在视图里点哪根骨, 列表就跳到哪一行,
+        offset 直接在下面调。
+
+        **不受 sync_select 管**: 那个开关管的是反方向 (点列表去改视图的选择), 那是有
+        副作用的, 该由用户决定; 这个方向只挪一个高亮, 没有副作用, 藏在一个默认关闭的
+        下拉菜单里只会让人以为功能坏了。
+
+        当前骨骼不在表里就谁都不高亮 (-1), 而不是退回上一次点过的行: 那会在选到一根
+        没配对的骨时把列表甩到一个不相干的位置, 看起来像"它配对到那一行了"。空着才是
+        实话 —— 这根骨这张表没说过。"""
+        context = bpy.context
+        active = getattr(context, 'active_pose_bone', None) or getattr(
+            context, 'active_bone', None)
+        row = self.row_of_bone(active.name if active is not None else '')
+        return row if row >= 0 or active is not None else self.get('stored_mapping', -1)
+
+    def set_active_mapping(self, value):
+        self['stored_mapping'] = value
+        # 传值进去, 不让它回头读 getter: 开着同步时 getter 答的是"活动骨骼那一行",
+        # 而这一刻活动骨骼还是上一根 —— 读回来就会去激活上一行的骨, 于是列表点哪
+        # 都跳不动。写入路径必须用刚写进去的那个值。
+        self.update_active(bpy.context, index=value)
+
+    def update_active(self, context, index=None):
+        index = self.active_mapping if index is None else index
+        if self.sync_select and 0 <= index < len(self.mappings):
+            m = self.mappings[index]
             dest = get_dest_object(context)
             if dest is not None:
                 b = dest.data.bones.get(m.dest)
@@ -426,17 +477,28 @@ class AnimRetState(bpy.types.PropertyGroup):
             'fake_user': True,
         }
 
+    def families_spec(self):
+        """面板上的两个家族字段 → 落盘的 skeletons 段 (逗号分隔 = 别名列表)。"""
+        def split(text):
+            return [part.strip() for part in str(text or '').split(',') if part.strip()]
+        source, dest = split(self.source_family), split(self.dest_family)
+        return {'source': source, 'dest': dest} if source and dest else {}
+
     def to_spec(self, dest_obj=None):
         # 与骨架转换面板同一种落盘格式 (presets.make_spec), 只有一种形状
         return presets.make_spec(
             self.mappings_spec(),
             source_armature=self.source.name if self.source else '',
             dest_armature=dest_obj.name if dest_obj else '',
-            settings=self.settings_spec())
+            settings=self.settings_spec(),
+            skeletons=self.families_spec())
 
     def from_spec(self, spec, context=None):
         self.mappings.clear()
         self.selected_count = 0
+        declared = spec.get('skeletons') or {}
+        self.source_family = ', '.join(str(n) for n in (declared.get('source') or []))
+        self.dest_family = ', '.join(str(n) for n in (declared.get('dest') or []))
         # 映射表与骨架改名表通用: 改名表的 from/to 就是这里的 source/dest
         # 只记下标: 集合 .add() 扩容会让先前取到的元素引用失效, 存引用会静默写空
         no_loc = []

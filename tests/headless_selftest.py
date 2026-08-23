@@ -223,22 +223,17 @@ def build_src_actions(src):
 def base_spec(loc_scale_mode='NONE', ik_hand=False, auto=True):
     md = [
         {'source': 'hips', 'dest': 'Hips',
-         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0],
-                 'align': None},
+         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0]},
          'loc': {'enabled': True, 'axes': [True, True, True],
                  'scale_mode': loc_scale_mode, 'scale': 1.0}},
         {'source': 'spine', 'dest': 'Spine',
-         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0],
-                 'align': None}},
+         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0]}},
         {'source': 'upperarm', 'dest': 'UpArm',
-         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0],
-                 'align': None}},
+         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0]}},
         {'source': 'forearm', 'dest': 'LoArm',
-         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0],
-                 'align': None}},
+         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0]}},
         {'source': 'hand', 'dest': 'Hand',
-         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0],
-                 'align': None}},
+         'rot': {'auto': auto, 'ortho': False, 'offset': [0, 0, 0]}},
     ]
     if ik_hand:
         md[-1]['ik'] = {'enabled': True, 'influence': 1.0, 'chain': 3}
@@ -372,8 +367,7 @@ def phase_equivalence():
                           rotation=(0, 0, math.radians(15)), scale=0.01)
     spec_id = {'mappings': [
         {'source': n, 'dest': n,
-         'rot': {'auto': True, 'ortho': False, 'offset': [0, 0, 0],
-                 'align': None},
+         'rot': {'auto': True, 'ortho': False, 'offset': [0, 0, 0]},
          'loc': ({'enabled': True, 'axes': [True, True, True],
                   'scale_mode': 'NONE', 'scale': 1.0}
                  if n == 'hips' else {'enabled': False})}
@@ -472,8 +466,7 @@ def phase_auto_align():
     reset_pose(src)
 
     spec_maps = [{'source': s, 'dest': d,
-                  'rot': {'auto': True, 'ortho': False, 'offset': [0, 0, 0],
-                          'align': None}}
+                  'rot': {'auto': True, 'ortho': False, 'offset': [0, 0, 0]}}
                  for s, d in (('hips', 'Hips'), ('upperarm', 'UpArm'),
                               ('forearm', 'LoArm'), ('hand', 'Hand'))]
     skel_s = core.snapshot_skeleton(src)
@@ -548,12 +541,11 @@ LEG_PAIRS = [('Thigh', 'UpperLeg'), ('ThighTwist', 'UpperLegTwists'),
              ('Calf', 'LowerLeg'), ('AnkleS', 'Ankle')]
 
 
-def leg_spec(offset=(0.0, 0.0, 0.0), aligns=None):
+def leg_spec(offset=(0.0, 0.0, 0.0)):
     """偏移只挂在 UpperLeg 上 — 子链是否跟着转就是被测行为。"""
     return [{'source': s, 'dest': d,
              'rot': {'auto': True, 'ortho': False,
-                     'offset': list(offset) if d == 'UpperLeg' else [0, 0, 0],
-                     'align': (list(aligns[d]) if aligns else None)}}
+                     'offset': list(offset) if d == 'UpperLeg' else [0, 0, 0]}}
             for s, d in LEG_PAIRS]
 
 
@@ -593,25 +585,8 @@ def phase_manual_offset():
         check('偏移%s: 整条子链同步转 25° (最大偏差 %.2e rad)' % (label, err),
               err < 1e-4)
 
-    # 与"捕捉对齐姿态"严格等价 — 真值取自 Blender 自身的姿态求值
-    pb = dst.pose.bones['UpperLeg']
-    pb.rotation_mode = 'QUATERNION'
-    pb.rotation_quaternion = Quaternion((1, 0, 0), ang)
-    bpy.context.view_layer.update()
-    aligns = {d: (dst.matrix_world @ dst.pose.bones[d].matrix).decompose()[1]
-              for _s, d in LEG_PAIRS}
-    pb.rotation_quaternion = (1, 0, 0, 0)
-    bpy.context.view_layer.update()
-
     src_skel = core.snapshot_skeleton(src)
     dest_skel = core.snapshot_skeleton(dst)
-    maps_align, _ = rm.build_mappings(src_skel, dest_skel,
-                                      leg_spec(aligns=aligns))
-    maps_off, _ = rm.build_mappings(src_skel, dest_skel,
-                                    leg_spec(offset=(ang, 0, 0)))
-    max_d = max(quat_angle(a.q_offset, b.q_offset)
-                for a, b in zip(maps_align, maps_off))
-    check('手动偏移 ≡ 摆好姿势后捕捉对齐 (差 %.2e rad)' % max_d, max_d < 1e-4)
 
     # 空态零成本: 没有偏移时参考姿态求值不介入, 旋转解逐位就是纯 rest 差
     plain, _ = rm.build_mappings(src_skel, dest_skel, leg_spec())
@@ -646,8 +621,7 @@ FACE_PAIRS = [('Head', 'HeadD'), ('EyeLid', 'LidD'), ('Jaw', 'JawD')]
 
 def face_spec(local):
     return [{'source': s, 'dest': d,
-             'rot': {'auto': True, 'ortho': False, 'offset': [0, 0, 0],
-                     'align': None},
+             'rot': {'auto': True, 'ortho': False, 'offset': [0, 0, 0]},
              'local': {'enabled': local}}
             for s, d in FACE_PAIRS]
 
