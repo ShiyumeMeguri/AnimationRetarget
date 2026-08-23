@@ -83,6 +83,11 @@ def _on_mapping_edit(self, context):
     _refresh_preview(get_state(context))
 
 
+def _split_aliases(text):
+    """面板上那一格逗号分隔的文字 → 别名表。"""
+    return [part.strip() for part in str(text or '').split(',') if part.strip()]
+
+
 def root_bone_names(dest_obj):
     """目标骨架的根骨 (无父级)。根骨承载整体位移, 只传旋转的话角色会原地不动。"""
     return {b.name for b in dest_obj.data.bones
@@ -353,14 +358,31 @@ class AnimRetState(bpy.types.PropertyGroup):
     active_route: bpy.props.StringProperty(
         default='', description='当前加载的组合通路 (源家族 → 目标家族)',
         override={'LIBRARY_OVERRIDABLE'})
+    # 一副骨架的身份 = 家族 + 配置。家族是这副骨架的出处 (一家公司换个招牌不算两个
+    # 家族), 配置是同家族下的体型分支 (Girl / Boy)。两侧都填齐的配置才是转换图上的一条
+    # 边, 才能被别的配置当跳板。哪些游戏用这副骨架, 定义在配置目录的 Families.json 里
+    # —— 代码里不出现任何一个具体家族。
     source_family: bpy.props.StringProperty(
-        name='源骨架家族', default='',
-        description='这份配置的来源骨架属于哪个家族 (逗号分隔可写多个别名)\n'
-                    '声明了两侧家族的配置才是转换图上的一条边, 才能被别的配置当跳板',
+        name='源家族', default='', description='来源骨架的家族名 (如 Illusion)',
+        override={'LIBRARY_OVERRIDABLE'})
+    source_config: bpy.props.StringProperty(
+        name='源配置', default='', description='该家族下的配置名 (如 Girl)',
+        override={'LIBRARY_OVERRIDABLE'})
+    source_aliases: bpy.props.StringProperty(
+        name='源家族别名', default='',
+        description='还有哪些游戏用这副骨架 (逗号分隔, 如 Koikatu, HoneyCome)\n'
+                    '别名让"我现在在浏览哪个游戏"认得出"那是哪副骨架"; 家族定义就写在'
+                    '用到它的表里, 不另开总表',
         override={'LIBRARY_OVERRIDABLE'})
     dest_family: bpy.props.StringProperty(
-        name='目标骨架家族', default='',
-        description='这份配置的目标骨架属于哪个家族 (逗号分隔可写多个别名)',
+        name='目标家族', default='', description='目标骨架的家族名 (如 Ruri)',
+        override={'LIBRARY_OVERRIDABLE'})
+    dest_config: bpy.props.StringProperty(
+        name='目标配置', default='', description='该家族下的配置名 (如 Girl)',
+        override={'LIBRARY_OVERRIDABLE'})
+    dest_aliases: bpy.props.StringProperty(
+        name='目标家族别名', default='',
+        description='还有哪些游戏用这副骨架 (逗号分隔)',
         override={'LIBRARY_OVERRIDABLE'})
 
     # ------------------------------------------------------------------
@@ -485,28 +507,29 @@ class AnimRetState(bpy.types.PropertyGroup):
             'fake_user': True,
         }
 
-    def families_spec(self):
-        """面板上的两个家族字段 → 落盘的 skeletons 段 (逗号分隔 = 别名列表)。"""
-        def split(text):
-            return [part.strip() for part in str(text or '').split(',') if part.strip()]
-        source, dest = split(self.source_family), split(self.dest_family)
-        return {'source': source, 'dest': dest} if source and dest else {}
-
     def to_spec(self, dest_obj=None):
-        # 与骨架转换面板同一种落盘格式 (presets.make_spec), 只有一种形状
+        # 与骨架转换面板同一种落盘格式 (presets.make_spec), 只有一种形状。
+        # 骨架**对象名**故意不写进去: 那是这一次打开这个 blend 的偶然事实, 存进配置
+        # 就等于让一份本该到处能用的表只对一个文件有效。
         return presets.make_spec(
             self.mappings_spec(),
-            source_armature=self.source.name if self.source else '',
-            dest_armature=dest_obj.name if dest_obj else '',
-            settings=self.settings_spec(),
-            skeletons=self.families_spec())
+            source={'family': self.source_family, 'config': self.source_config,
+                    'aliases': _split_aliases(self.source_aliases)},
+            dest={'family': self.dest_family, 'config': self.dest_config,
+                  'aliases': _split_aliases(self.dest_aliases)},
+            settings=self.settings_spec())
 
     def from_spec(self, spec, context=None):
         self.mappings.clear()
         self.selected_count = 0
-        declared = spec.get('skeletons') or {}
-        self.source_family = ', '.join(str(n) for n in (declared.get('source') or []))
-        self.dest_family = ', '.join(str(n) for n in (declared.get('dest') or []))
+        source_side = spec.get('source') or {}
+        dest_side = spec.get('dest') or {}
+        self.source_family = str(source_side.get('family') or '')
+        self.source_config = str(source_side.get('config') or '')
+        self.source_aliases = ', '.join(str(a) for a in (source_side.get('aliases') or []))
+        self.dest_family = str(dest_side.get('family') or '')
+        self.dest_config = str(dest_side.get('config') or '')
+        self.dest_aliases = ', '.join(str(a) for a in (dest_side.get('aliases') or []))
         # 映射表与骨架改名表通用: 改名表的 from/to 就是这里的 source/dest
         # 只记下标: 集合 .add() 扩容会让先前取到的元素引用失效, 存引用会静默写空
         no_loc = []

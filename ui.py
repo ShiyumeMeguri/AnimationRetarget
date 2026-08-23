@@ -109,9 +109,11 @@ class ANIMRET_MT_presets(bpy.types.Menu):
         alive = [route for route in routed if counted[route.key]]
 
         if alive:
-            layout.label(text='转换 (%d 个家族张成 %d 对)'
-                              % (len(compose.families(edges)), len(alive)),
+            layout.label(text='转换 (%d 副骨架张成 %d 对)'
+                              % (len(compose.sides(edges)), len(alive)),
                          icon='DECORATE_LINKED')
+            # 盘上真有那份文件的打勾, 当场算出来的 (拼的, 或反着读的) 打加号 ——
+            # 加号意味着"点了能用, 但还没有文件, 另存为才会固化"。
             for route in alive:
                 op = layout.operator('animret.preset_load',
                                      text=route.label(counted[route.key]),
@@ -133,7 +135,7 @@ class ANIMRET_MT_presets(bpy.types.Menu):
                  if name not in edge_names]
         if loose:
             layout.separator()
-            layout.label(text='未声明骨架家族 (不参与组合)', icon='FILE_BLANK')
+            layout.label(text='未声明家族/配置 (不参与组合)', icon='FILE_BLANK')
             for label, name in loose:
                 op = layout.operator('animret.preset_load', text=label,
                                      translate=False)
@@ -230,10 +232,16 @@ def _draw_mapping_block(layout):
     box.operator('animret.preset_open_folder', text='', icon='FILE_FOLDER')
     if s.active_route and not s.active_preset:
         holder.label(text='组合出来的, 还没有文件 —— 另存为即可固化', icon='PLUS')
-    families = holder.row(align=True)
-    families.prop(s, 'source_family', text='')
-    families.label(icon='FORWARD')
-    families.prop(s, 'dest_family', text='')
+    identity = holder.row(align=True)
+    identity.prop(s, 'source_family', text='')
+    identity.prop(s, 'source_config', text='')
+    identity.label(icon='FORWARD')
+    identity.prop(s, 'dest_family', text='')
+    identity.prop(s, 'dest_config', text='')
+    alias_row = holder.row(align=True)
+    alias_row.prop(s, 'source_aliases', text='', icon='OUTLINER_COLLECTION')
+    alias_row.label(icon='BLANK1')
+    alias_row.prop(s, 'dest_aliases', text='', icon='OUTLINER_COLLECTION')
 
     right = row.column(align=True)
     right.separator()

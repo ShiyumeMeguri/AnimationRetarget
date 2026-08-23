@@ -544,7 +544,11 @@ class ANIMRET_OT_preset_save_as(_StateOperator, bpy.types.Operator):
     def invoke(self, context, event):
         s = get_state(context)
         if not self.name:
-            self.name = s.active_preset or ''
+            # 拼出来的那一份本来就知道自己是哪一对 —— 家族To家族 就是它的名字,
+            # 不该让用户再想一个。
+            self.name = s.active_preset or compose.default_name(
+                compose.Side(s.source_family, s.source_config),
+                compose.Side(s.dest_family, s.dest_config))
         return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
@@ -559,8 +563,8 @@ class ANIMRET_OT_preset_save_as(_StateOperator, bpy.types.Operator):
         # 存下来就有文件了, 不再是"拼出来的"; 声明了两侧家族的话, 它自己也成了
         # 转换图上的一条新边, 下次枚举时能给别人当跳板。
         s.active_route = ''
-        edge = ' —— 已成为转换图上的一条边' if spec.get('skeletons') else (
-            ' (没填骨架家族, 不会出现在组合里)')
+        edge = (' —— 已成为转换图上的一条边' if spec.get('source') and spec.get('dest')
+                else ' (没填家族/配置, 不会出现在组合里)')
         self.report({'INFO'}, '已保存预设: %s%s' % (path, edge))
         return {'FINISHED'}
 
@@ -591,8 +595,7 @@ class ANIMRET_OT_preset_load(_StateOperator, bpy.types.Operator):
                 return {'CANCELLED'}
             s.from_spec(spec, context)
             # 直连就是那份文件本身, 可以照常"保存"; 拼出来的没有文件, 只能另存为。
-            s.active_preset = found.hops[0].name if (found.direct
-                                                     and not found.hops[0].flipped) else ''
+            s.active_preset = found.stored_name
             s.active_route = found.key
             self.report({'INFO'}, '已加载 %s (%d 条映射)%s' % (
                 found.label(), len(s.mappings),

@@ -63,37 +63,63 @@ def normalize_pairs_rows(spec):
 
 
 FORMAT = 'AnimationRetarget'
-VERSION = 3
+VERSION = 4
 
 
-def make_spec(pairs, display_name='', source_armature='', dest_armature='',
-              settings=None, skeletons=None):
-    """唯一的落盘格式: mappings 一条一条 {source, dest, …}。
+def make_spec(pairs, source=None, dest=None, settings=None, display_name=''):
+    """唯一的落盘格式。一份配置只说两件事:
 
-    两个面板都用它写, 所以同一份配置只会有一个文件、一种形状。
+        它连接**哪两副骨架**   source / dest = {"family", "config"}
+        以及**怎么连**         mappings 一条一条 {source, dest, rot/loc/ik ...}
 
-    ``skeletons`` 声明这份配置桥接哪两个**骨架家族** (各是别名列表)。它不是装饰:
-    配置目录是一张家族的有向图, 声明了两侧的配置才是图上的一条边, 才能被别的配置拿去
-    当跳板 (见 compose)。所以它跟 mappings 一样由这里产出、由这里覆盖 —— 一份另存出来
-    的组合配置必须自带它, 否则它自己就上不了图。
+    骨架身份是 家族 + 配置, 两个都只是名字 —— **代码里不出现任何一个具体家族**。
+    家族连同它的别名就写在 source/dest 里, 所以目录里只有 XXToXX.json 一种文件,
+    一份表拿走就能单独用 (见 compose)。
+
+    这里不再记任何**场景里的东西**: 骨架对象叫什么是这一次打开这个 blend 的偶然事实,
+    存进配置就等于让一份本该到处能用的表只对一个文件有效。配置里只有骨名与偏移这类
+    骨架自己的固有信息。
+
+    ``display_name`` 只服务骨架改名表 —— 那种表不连接两副骨架, 不上图, 只需要一个
+    人读的标题。重定向表不写它: 它的标题就是"家族 配置 → 家族 配置", 现算即可。
     """
-    return {
+    spec = {
         'format': FORMAT,
         'version': VERSION,
-        'display_name': display_name,
-        'source_armature': source_armature,
-        'dest_armature': dest_armature,
+        'source': _side_spec(source),
+        'dest': _side_spec(dest),
         'settings': settings or {},
         'mappings': pairs,
-        'skeletons': skeletons or {},
     }
+    if display_name:
+        spec['display_name'] = display_name
+    return spec
 
 
-# 本模块自己负责的顶层键 = make_spec 产出的那些, 外加 renames ——
-# renames 是 mappings 的读侧简写别名 (见 normalize_pairs), 同一份骨对的第二种形状,
-# 所以存回去时必须跟着 mappings 一起被覆盖掉; 留着它 = 同一批骨对被读两遍。
-# 从 make_spec 自己推出来, 不另抄一份名单。
-OWNED_KEYS = frozenset(make_spec([]).keys()) | {'renames'}
+def _side_spec(side):
+    """Side 对象 / dict / None → 落盘用的 {"family", "config"}。"""
+    if side is None:
+        return {}
+    family = getattr(side, 'family', None)
+    config = getattr(side, 'config', None)
+    if family is None and isinstance(side, dict):
+        family, config = side.get('family'), side.get('config')
+    aliases = getattr(side, 'aliases', None)
+    if aliases is None and isinstance(side, dict):
+        aliases = side.get('aliases')
+    family, config = str(family or '').strip(), str(config or '').strip()
+    if not (family and config):
+        return {}
+    spec = {'family': family, 'config': config}
+    names = [str(a).strip() for a in (aliases or ()) if str(a).strip()]
+    if names:
+        spec['aliases'] = names
+    return spec
+
+
+OWNED_KEYS = frozenset(make_spec([]).keys()) | {'renames', 'display_name',
+                                                'source_armature', 'dest_armature',
+                                                'skeletons'}
 
 
 def preset_dir(subdir=PRESET_SUBDIR, create=True):

@@ -72,8 +72,8 @@ def parse_args(argv):
 
     def common(sp):
         sp.add_argument('--blend', help='要打开的 .blend 文件 (已在 Blender 内打开时省略)')
-        sp.add_argument('--dest', help='目标骨架对象名 (省略时取配置里的 dest_armature)')
-        sp.add_argument('--source', help='来源骨架对象名 (省略时取配置里的 source_armature)')
+        sp.add_argument('--dest', help='目标骨架对象名 (省略时取场景里唯一的骨架)')
+        sp.add_argument('--source', help='来源骨架对象名 (省略时取场景里唯一的骨架)')
         sp.add_argument('--preset', help='JSON 配置: 文件路径或用户预设名 (省略时用目标骨架上嵌入的配置)')
 
     sp = sub.add_parser('list', help='列出骨架与动作')
@@ -189,7 +189,6 @@ def spec_from_idprops(arm_data):
         return None
     settings = {}
     return {'format': 'AnimationRetarget', 'version': 2,
-            'source_armature': '', 'dest_armature': '',
             'settings': settings, 'mappings': mappings}
 
 
@@ -212,9 +211,9 @@ def resolve_rigs(args, spec):
     dest = find_armature(args.dest, '目标')
     src = find_armature(args.source, '来源')
     if dest is None and spec:
-        dest = find_armature(spec.get('dest_armature') or None, '目标')
+        dest = find_armature(None, '目标')
     if src is None and spec:
-        src = find_armature(spec.get('source_armature') or None, '来源')
+        src = find_armature(None, '来源')
     arms = [o for o in bpy.data.objects if o.type == 'ARMATURE']
     if (dest is None or src is None) and spec:
         # 按映射骨名与各骨架骨骼的交集自动判别
