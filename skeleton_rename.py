@@ -29,6 +29,13 @@
 动画不会因改名而失效, 不需要 (也不应该) 在这之上再手搓一遍同步: 手搓版本
 只会用改名前的旧表把引擎刚修好的引用改错, 互换名场景尤其致命。
 
+Unity 骨架身份 (RuriRipperImporter) 同理不需要本工具收尾: 那份身份现在烙在
+**骨骼自己身上** (`bone["ruri_unity_path"]` = 这根骨是哪个 transform), 自定义
+属性跟着数据块走, 改名碰不到它。曾经有过一段 `rewrite_rig_stamp` —— 那时骨名
+是存在骨架对象的印记里的一个普通字符串, 改完名不同步就再也按 clip 路径找不到骨,
+于是要靠"记得走本工具改名"来兜底。**能靠记性兜底的设计本身就是错的**, 所以那份
+身份被搬到了骨骼上, 这段收尾也就随之删掉了: 现在**在哪里怎么改名都不会丢身份**。
+
 引擎的联动只覆盖"挂在某个对象动画数据上"的动作。从游戏/FBX 导进来堆在文件里
 的那一大批动作没有任何使用者, 引擎不会替它们改路径 —— 那批就是第 4 步的活。
 """
@@ -176,49 +183,9 @@ def delete_rename_preset(name):
 
 # ---------------------------------------------------------------------------
 # 重命名应用: 两阶段防冲突改名 (顶点组/FCurve/约束引用由 Blender 引擎自身
-# 的 Bone.name setter 联动维护, 见文件头说明, 这里不重复实现)
+# 的 Bone.name setter 联动维护, Unity 骨架身份烙在骨骼自己身上改名碰不到,
+# 见文件头说明, 这里都不重复实现)
 # ---------------------------------------------------------------------------
-
-UNITY_RIG_PROP = 'ruri_unity_rig'
-
-
-def rewrite_rig_stamp(obj, name_map):
-    """把 Unity 骨架身份印记(RuriRipperImporter 导入时烙的 `ruri_unity_rig`)里的
-    骨名按 ``name_map`` 一起改掉。
-
-    那份印记是 {transform path: {"bone", "local"}},"从动画 clip 的曲线路径找到本骨架
-    哪根骨"全靠它。骨名是它自己存的一份普通字符串,**引擎的改名联动管不到**
-    (引擎只联动顶点组 / FCurve 路径 / 约束 subtarget),所以改完名不同步这一份,
-    以后按 clip 路径加载动画就会找不到骨头。
-
-    这是改名动作自己的收尾, 不是印记该防的事 —— 在这个工具里改名就顺手改掉;
-    绕过这个工具手动改名, 那份印记就得用户自己负责。
-
-    返回改写的条目数; 骨架没有这份印记时返回 0。
-    """
-    raw = obj.get(UNITY_RIG_PROP)
-    if not raw:
-        return 0
-    try:
-        document = json.loads(str(raw))
-        paths = document['paths']
-    except (ValueError, KeyError, TypeError):
-        return 0
-    if not isinstance(paths, dict):
-        return 0
-    changed = 0
-    for entry in paths.values():
-        if not isinstance(entry, dict):
-            continue
-        new = name_map.get(entry.get('bone'))
-        if new is not None and new != entry.get('bone'):
-            entry['bone'] = new
-            changed += 1
-    if changed:
-        document['paths'] = paths
-        obj[UNITY_RIG_PROP] = json.dumps(document, separators=(',', ':'))
-    return changed
-
 
 def apply_rename(obj, pairs):
     """pairs: [(old, new), ...]。
@@ -258,13 +225,10 @@ def apply_rename(obj, pairs):
         if b.name != new:
             collided.append((old, new, b.name))
 
-    rig_stamp = rewrite_rig_stamp(obj, rename_map)
-
     return {
         'renamed': sorted(rename_map.items()),
         'missing': missing,
         'collided': collided,
-        'rig_stamp': rig_stamp,
     }
 
 

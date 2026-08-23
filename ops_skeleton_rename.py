@@ -114,8 +114,8 @@ class ANIMRETSK_OT_apply_rename(_ArmatureOperator, bpy.types.Operator):
                       '正向 = 表里的 原名→新名; 反向 = 新名→原名, 用来还原\n'
                       '顶点组名 / FCurve 路径 / 同骨架约束 subtarget 由 Blender '
                       '自身联动维护, 蒙皮与已有动画不会因改名而失效\n'
-                      'Unity 骨架印记 (ruri_unity_rig) 里的骨名由本操作一并同步, '
-                      '所以改完名仍能按 clip 路径加载动画; 绕过本工具手动改名则需自行处理')
+                      'Unity 骨架身份烙在骨骼自己身上 (ruri_unity_path), 改名碰不到它, '
+                      '所以改完名照样能加载动画和表情 —— 在哪里怎么改名都一样')
     bl_options = {'UNDO'}
 
     reverse: bpy.props.BoolProperty(
@@ -138,10 +138,8 @@ class ANIMRETSK_OT_apply_rename(_ArmatureOperator, bpy.types.Operator):
             self.report({'WARNING'}, '骨架上找不到 %d 个源名 (该方向可能已经应用过)'
                         % len(report['missing']))
         skeleton_rename.refresh_action_counts(s)
-        stamp = report.get('rig_stamp', 0)
-        self.report({'INFO'}, '%s: 已重命名 %d 根骨骼%s'
-                    % ('还原' if self.reverse else '转换', len(report['renamed']),
-                       ', 同步 Unity 骨架印记 %d 条' % stamp if stamp else ''))
+        self.report({'INFO'}, '%s: 已重命名 %d 根骨骼'
+                    % ('还原' if self.reverse else '转换', len(report['renamed'])))
         return {'FINISHED'}
 
 
