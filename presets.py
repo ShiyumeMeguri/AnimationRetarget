@@ -118,8 +118,7 @@ def _side_spec(side):
 
 
 OWNED_KEYS = frozenset(make_spec([]).keys()) | {'renames', 'display_name',
-                                                'source_armature', 'dest_armature',
-                                                'skeletons'}
+                                                'source_armature', 'dest_armature'}
 
 
 def preset_dir(subdir=PRESET_SUBDIR, create=True):
@@ -147,8 +146,8 @@ def save_preset(name, spec, subdir=PRESET_SUBDIR):
 
     **不归本模块管的顶层键 (OWNED_KEYS 之外的) 一律原样保留。** to_spec 是从面板
     状态重新拼一份 spec 出来的, make_spec 只产出它认识的那几个键 —— 所以本模块看不懂
-    的段落 (手写/AI 写进去的 skeletons 家族声明、face 表情契约) 在"读进来看一眼再点
-    保存"之后就会凭空消失, 而且**不报错**: 文件还在, 只是从此不再桥接那对骨架。
+    的段落 (手写/AI 写进去的 face 表情契约) 在"读进来看一眼再点保存"之后就会凭空消失,
+    而且**不报错**: 文件还在, 只是从此不再带着那一对骨架的表情。
 
     反过来, OWNED_KEYS 里的键必须**被这次写入覆盖掉**, 保留才是错的 —— renames 是
     mappings 的别名, 留着盘上那份就等于同一批骨对存了两遍、读的时候翻一倍。

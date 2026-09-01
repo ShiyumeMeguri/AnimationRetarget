@@ -23,11 +23,18 @@
   4. 同一份对照表还能直接拿去转换动作: 把当前 blend 文件里的动作收进面板,
      按表改写动作内部的骨骼引用 (FCurve 路径 + 通道组名), 同样支持互转。
 
-骨架改名只需要管好骨骼名本身的冲突: Blender 的 Bone.name setter 本来就会把
-顶点组名 / FCurve 路径 / 同骨架内约束 subtarget 一并改掉 (逐条 RNA 属性
-赋值触发, 不是只有菜单里的重命名操作符才有 —— 已实测确认), 蒙皮和已有
-动画不会因改名而失效, 不需要 (也不应该) 在这之上再手搓一遍同步: 手搓版本
-只会用改名前的旧表把引擎刚修好的引用改错, 互换名场景尤其致命。
+FCurve 路径 / 同骨架内约束 subtarget 由 Blender 的 Bone.name setter 自己联动
+维护 (逐条 RNA 属性赋值触发, 不是只有菜单里的重命名操作符才有 —— 已实测确认),
+这两样不需要 (也不应该) 在这之上再手搓一遍。
+
+**顶点组不在此列。** 引擎的联动在"目标组名已经被网格上另一个组占着"时会
+**整条静默跳过**: 既不改名, 也不加 .001 后缀 (实测: 骨骼 Finger02_L 改名为
+Bip001_L_Finger02, 而网格上已有同名组 ⇒ 骨骼改了, 两个组一个都没动)。后果是
+原本正确的那个组变成孤儿 (再没有同名骨骼), 而这根骨骼被那个外来同名组接管 ——
+只在"恰好撞名"的那批骨上发生, 于是表现为**部分**顶点跳到另一套命名去了,
+换个方向跑就换一批。把别的骨架的网格合并进来时 (对方带着自己那套顶点组名)
+必然撞上, 而且**没有任何报错**。所以顶点组由本模块自己接管 (_retake_vertex_groups):
+同样两阶段临时名防互换名冲突, 撞上已存在的同名组就把权重并进去。
 
 Unity 骨架身份 (RuriRipperImporter) 同理不需要本工具收尾: 那份身份现在烙在
 **骨骼自己身上** (`bone["ruri_unity_path"]` = 这根骨是哪个 transform), 自定义
@@ -182,10 +189,77 @@ def delete_rename_preset(name):
 
 
 # ---------------------------------------------------------------------------
-# 重命名应用: 两阶段防冲突改名 (顶点组/FCurve/约束引用由 Blender 引擎自身
-# 的 Bone.name setter 联动维护, Unity 骨架身份烙在骨骼自己身上改名碰不到,
-# 见文件头说明, 这里都不重复实现)
+# 重命名应用: 两阶段防冲突改名。FCurve / 约束引用由 Blender 引擎自身的
+# Bone.name setter 联动维护, Unity 骨架身份烙在骨骼自己身上改名碰不到 ——
+# 这两样不重复实现; 顶点组的联动在撞名时会静默跳过, 所以由这里自己接管,
+# 见文件头说明。
 # ---------------------------------------------------------------------------
+
+VG_TMP_PREFIX = '.animret.vg.'
+BONE_TMP_PREFIX = '.animret.tmp.'
+
+
+def _group_weights(mesh_obj, group_index):
+    """该顶点组里所有非零权重: {顶点下标: 权重}。"""
+    out = {}
+    for v in mesh_obj.data.vertices:
+        for e in v.groups:
+            if e.group == group_index and e.weight != 0.0:
+                out[v.index] = e.weight
+    return out
+
+
+def _stage_vertex_groups(arm_obj, moves):
+    """改骨骼**之前**: 把要跟着走的顶点组先寄存到临时名下。
+
+    moves: [(old, new), ...] 已过滤掉恒等行与骨架上不存在的原名。
+    寄存之后网格上不再有任何叫 old 的组, 于是接下来改骨骼时引擎那套顶点组
+    联动全程都是确定的空操作 —— 既不会漏改, 也不会在互换名 (A→B, B→A)
+    这种表里把刚落位的组又拖去另一边 (临时名前缀与骨骼那套错开, 引擎也
+    不会认领)。
+    返回 [(网格对象, 临时名, 原组名, 目标组名), ...]。
+    """
+    staged = []
+    for mesh_obj in deforming_meshes(arm_obj):
+        groups = mesh_obj.vertex_groups
+        for i, (old, new) in enumerate(moves):
+            g = groups.get(old)
+            if g is None:
+                continue
+            tmp = VG_TMP_PREFIX + str(i)
+            g.name = tmp
+            staged.append((mesh_obj, tmp, old, new))
+    return staged
+
+
+def _finalize_vertex_groups(staged):
+    """改完骨骼**之后**: 把寄存的顶点组落到目标名上。
+
+    此时网格上还叫 new 的组一定是"外来的、不跟着这次改名走"的那一个 (典型来源:
+    把别的骨架的网格合并进来, 对方带着自己那套顶点组名)。引擎碰到这种情况会
+    整条静默跳过, 这里改为把权重按顶点相加并进去, 并把合并事实报出去。
+
+    全程按名字重新查找, 不跨删除持有 VertexGroup 引用 (集合删除会让残留引用
+    失效 / 下标漂移)。
+    返回 [(网格名, 原组名, 目标组名, 并进去的顶点数), ...]。
+    """
+    merged = []
+    for mesh_obj, tmp, old, new in staged:
+        groups = mesh_obj.vertex_groups
+        g = groups.get(tmp)
+        if g is None:
+            continue
+        target = groups.get(new)
+        if target is None:
+            g.name = new
+            continue
+        weights = _group_weights(mesh_obj, g.index)
+        for index, weight in weights.items():
+            target.add([index], weight, 'ADD')
+        groups.remove(groups.get(tmp))
+        merged.append((mesh_obj.name, old, new, len(weights)))
+    return merged
+
 
 def apply_rename(obj, pairs):
     """pairs: [(old, new), ...]。
@@ -196,7 +270,8 @@ def apply_rename(obj, pairs):
     自动加 .001 后缀写歪。
     返回统计报告 dict: renamed(实际生效的 (old, new) 列表, new 可能因目标名
     冲突被 Blender 加了后缀) / missing(骨架上不存在的原名) / collided
-    (目标名被占用、实际改名结果与请求不符的三元组)。
+    (目标名被占用、实际改名结果与请求不符的三元组) / merged(绑定网格上目标组名
+    已被外来组占着、权重被并进去的 (网格, 原组, 目标组, 顶点数) 列表)。
     """
     data = obj.data
     seen, jobs, missing = set(), [], []
@@ -210,8 +285,11 @@ def apply_rename(obj, pairs):
             continue
         jobs.append([old, new, None])
 
+    # 顶点组由本模块接管: 改骨骼前先寄存, 改完再落名 (见文件头与两个helper)。
+    staged = _stage_vertex_groups(obj, [(j[0], j[1]) for j in jobs if j[0] != j[1]])
+
     for i, job in enumerate(jobs):
-        tmp = '.animret.tmp.%d' % i
+        tmp = BONE_TMP_PREFIX + str(i)
         data.bones[job[0]].name = tmp
         job[2] = tmp
 
@@ -225,10 +303,13 @@ def apply_rename(obj, pairs):
         if b.name != new:
             collided.append((old, new, b.name))
 
+    merged = _finalize_vertex_groups(staged)
+
     return {
         'renamed': sorted(rename_map.items()),
         'missing': missing,
         'collided': collided,
+        'merged': merged,
     }
 
 

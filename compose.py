@@ -273,39 +273,104 @@ def routes(edges=None, max_hops=MAX_HOPS):
     return [found[key] for key in sorted(found)]
 
 
-def resolve_side(name, edges=None):
-    """把用户/宿主说的一个名字认成图上的一副骨架。
+def sides_for(name, edges=None):
+    """这个名字**可能**指的每一副骨架, 按 家族/配置 排序。
 
-    接受 ``Family.Config``、光一个家族名、或一个别名 (游戏 productName)。只给家族而
-    该家族在图上只有一个配置时用那个; 有好几个就**不猜** —— 返回 None, 由调用方说
-    "得指明是哪个配置", 猜出来的答案会把动画套到另一种体型上。"""
+    ``Family.Config`` 指名道姓 → 就那一副; 光一个家族名、或它的某个别名 (换了招牌的
+    工作室、共用这副骨架的另一个游戏的 productName) → 该家族在图上的每一个配置。名字
+    认不出来 → 空。
+
+    **名字给不出配置是常态, 不是错误**: 宿主给的是游戏名, 骨架自己盖的章是家族名,
+    两者都不知道体型分支是 Girl 还是 Boy。所以这里不猜也不拒, 把候选原样交出去 ——
+    由 route_for 拿观测到的骨名、和图上真走得通的通路去收敛它。"""
     edges = load_edges() if edges is None else edges
     text = str(name or '').strip()
     if not text:
-        return None
+        return []
     known = sides(edges)
     if '.' in text:
-        wanted = Side(*text.split('.', 1))
-        wanted = Side(family_of(wanted.family, edges), wanted.config)
-        return next((side for side in known if side == wanted), None)
+        family, _sep, config = text.partition('.')
+        wanted = Side(family_of(family, edges), config)
+        return [side for side in known if side == wanted]
     family = family_of(text, edges)
-    matches = [side for side in known if fold(side.family) == fold(family)]
-    return matches[0] if len(matches) == 1 else None
+    return [side for side in known if fold(side.family) == fold(family)]
 
 
-def route_for(source, dest, edges=None):
-    """A→B 的那一条, 或 None。两端同一副骨架时返回一条空 Route (不需要转换)。"""
+def side_bones(side, edges=None):
+    """这副骨架的**骨名词汇**: 每份提到它的表, 在它这一端写下的骨名的并集。
+
+    并集而不是某一份表的内容: 同一副骨架被好几份表从不同角度提到, 每份只写得出自己
+    用得上的那一部分 (实测 Ruri.Girl 在一份表里是 508 根、在另一份里只有 53 根)。
+    合起来才是"这副骨架长什么样"。"""
+    names = set()
+    for _name, spec, source, dest in (load_edges() if edges is None else edges):
+        for end, declared in (('source', source), ('dest', dest)):
+            if declared == side:
+                names.update(str(row.get(end) or '')
+                             for row in presets.normalize_pairs_rows(spec))
+    names.discard('')
+    return names
+
+
+def fit(side, bones, edges=None):
+    """观测到的一组骨名与这副骨架的词汇有多像 —— 交集 / 并集。
+
+    两边一起看, 而不是只看"这副骨架的骨名有多少落在观测上": 同一家族的配置之间常是
+    包含关系 (实测 Ruri.Boy 的 165 根骨是 Ruri.Girl 的 508 根的真子集), 只看覆盖率的话
+    小的那一个永远满分, 大小是反的 —— 实测一副 497 根骨的 Ruri Girl 骨架对 Ruri.Boy
+    覆盖率 1.000、对 Ruri.Girl 才 0.963。并集一除进去偏向就没了 (0.332 vs 0.948)。"""
+    names = side_bones(side, edges)
+    observed = {str(bone) for bone in bones or ()}
+    if not names or not observed:
+        return 0.0
+    return len(names & observed) / float(len(names | observed))
+
+
+def narrowed(candidates, bones, edges=None):
+    """观测得到骨名时, 候选里只留最像的那些 (见 fit); 观测不到就原样。"""
+    candidates = list(candidates)
+    if len(candidates) < 2 or not bones:
+        return candidates
     edges = load_edges() if edges is None else edges
-    start = resolve_side(source, edges)
-    finish = resolve_side(dest, edges)
-    if start is None or finish is None:
+    scored = [(fit(side, bones, edges), side) for side in candidates]
+    best = max(score for score, _side in scored)
+    if best <= 0.0:
+        return candidates
+    return [side for score, side in scored if score == best]
+
+
+def routes_between(sources, dests, edges=None):
+    """这两组骨架之间, 图上真走得通的每一条通路。"""
+    edges = load_edges() if edges is None else edges
+    sources, dests = set(sources), set(dests)
+    return [route for route in routes(edges)
+            if route.source in sources and route.dest in dests]
+
+
+def route_for(source, dest, edges=None, source_bones=(), dest_bones=()):
+    """A→B 的那一条, 或 None。
+
+    两端各是**一个名字**: 家族名、别名 (换了招牌的工作室、共用这副骨架的另一个游戏),
+    或指名道姓的 ``Family.Config``。名字只认得出家族时, 该家族的每个配置都是候选, 由
+    两件互不依赖的事去收敛, 而不是靠猜:
+
+    * ``source_bones`` / ``dest_bones`` —— 那一端骨架**实际有哪些骨**, 拿去跟候选的词汇
+      比 (见 fit)。观测不到就空着。
+    * **图上真有的通路** —— 一端定下来之后, 到得了它的往往只剩一个配置, 这时候一根骨头
+      都不用看 (实测 Illusion 只够得到 Ruri.Girl: Ruri.Boy 从 Illusion 无路可走)。
+
+    收敛完还剩不止一对骨架 = 真的分不出来, 返回 None 让调用方说"得指明是哪个配置" ——
+    猜出来的答案会把动画套到另一种体型上。两端本来就是同一副时返回一条空 Route。"""
+    edges = load_edges() if edges is None else edges
+    starts = narrowed(sides_for(source, edges), source_bones, edges)
+    finishes = narrowed(sides_for(dest, edges), dest_bones, edges)
+    if not starts or not finishes:
         return None
-    if start == finish:
-        return Route(start, finish, [])
-    for route in routes(edges):
-        if route.source == start and route.dest == finish:
-            return route
-    return None
+    shared = [side for side in starts if side in finishes]
+    if shared:
+        return Route(shared[0], shared[0], [])
+    found = routes_between(starts, finishes, edges)
+    return found[0] if len(found) == 1 else None
 
 
 # ── 拼接 ──────────────────────────────────────────────────────────────────────

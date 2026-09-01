@@ -137,9 +137,18 @@ class ANIMRETSK_OT_apply_rename(_ArmatureOperator, bpy.types.Operator):
         if report['missing']:
             self.report({'WARNING'}, '骨架上找不到 %d 个源名 (该方向可能已经应用过)'
                         % len(report['missing']))
+        merged = report['merged']
+        if merged:
+            verts = sum(n for _m, _o, _t, n in merged)
+            meshes = sorted({m for m, _o, _t, _n in merged})
+            self.report({'WARNING'},
+                        '目标顶点组已被外来同名组占用: 合并了 %d 个组 (%d 个顶点的权重相加) '
+                        '于 %s —— 引擎联动在这种情况下会静默跳过, 由本工具接管'
+                        % (len(merged), verts, ', '.join(meshes)))
         skeleton_rename.refresh_action_counts(s)
-        self.report({'INFO'}, '%s: 已重命名 %d 根骨骼'
-                    % ('还原' if self.reverse else '转换', len(report['renamed'])))
+        self.report({'INFO'}, '%s: 已重命名 %d 根骨骼%s'
+                    % ('还原' if self.reverse else '转换', len(report['renamed']),
+                       (', 合并 %d 个顶点组' % len(merged)) if merged else ''))
         return {'FINISHED'}
 
 

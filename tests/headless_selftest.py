@@ -1227,11 +1227,11 @@ def phase_skeleton_rename():
           arm.data.bones['Chest'].parent.name == 'Pelvis'
           and arm.data.bones['ArmR'].parent.name == 'Chest')
 
-    # 顶点组名 / FCurve 路径 / 约束 subtarget 是 Blender 引擎自身在
-    # Bone.name setter 里联动维护的, 这里验证经过两阶段临时改名(含互换名)
-    # 中转之后, 引擎联动的最终结果依然正确 (不是我们手搓同步, 见文件头说明)。
+    # 顶点组由本模块接管 (寄存→改骨骼→落名), FCurve 路径 / 约束 subtarget 仍由
+    # 引擎联动。这里验证互换名 (ArmL→ArmR, ArmR→ArmL) 下组名跟着骨骼走到位:
+    # 若把组直接改到位再改骨骼, 引擎会在改 ArmR 那一步把刚落位的组又拖回 ArmL。
     vg_names = {v.name for v in mesh_obj.vertex_groups}
-    check('引擎联动: 顶点组随骨骼改名(互换名场景) %s' % sorted(vg_names),
+    check('顶点组随骨骼改名(互换名场景) %s' % sorted(vg_names),
           vg_names == {'Pelvis', 'Chest', 'ArmR'})
 
     fcurve_paths = {fc.data_path for fc in core.iter_action_fcurves(act)}
@@ -1242,6 +1242,51 @@ def phase_skeleton_rename():
     moved_con_bone = arm.pose.bones['ArmL']   # 原 ArmR 骨(挂了约束), 现名 ArmL
     check('引擎联动: 自引用约束 subtarget 随骨骼改名',
           moved_con_bone.constraints[0].subtarget == 'ArmR')
+
+    # --- 顶点组撞名: 网格上已有一个叫目标名的外来组 (从别的骨架合并进来的
+    # 那套命名) → 引擎联动在这种情况下会整条静默跳过, 必须由本模块接管并
+    # 把权重合并, 否则原本正确的组变成孤儿、骨骼被外来组接管 ---
+    reset_blend()
+    arm3 = build_armature('SkelSrc3', SKEL_BONES)
+    mesh3 = bpy.data.meshes.new('ClashMesh')
+    mesh3.from_pydata([(0, 0, 0), (0, 0, 1), (1, 0, 0)], [], [(0, 1, 2)])
+    mesh3.update()
+    obj3 = bpy.data.objects.new('ClashMeshObj', mesh3)
+    bpy.context.scene.collection.objects.link(obj3)
+    mod3 = obj3.modifiers.new('Armature', 'ARMATURE')
+    mod3.object = arm3
+
+    real = obj3.vertex_groups.new(name='ArmL')          # 跟着骨骼走的那份
+    real.add([0], 1.0, 'REPLACE')
+    real.add([2], 0.25, 'REPLACE')
+    foreign = obj3.vertex_groups.new(name='Bip001_L_Arm')  # 合并进来的外来那份
+    foreign.add([1], 0.5, 'REPLACE')
+    foreign.add([2], 0.25, 'REPLACE')                   # 与 real 在顶点2 上重叠
+
+    report3 = skel.apply_rename(arm3, [('ArmL', 'Bip001_L_Arm')])
+    names3 = {b.name for b in arm3.data.bones}
+    check('顶点组撞名: 骨骼改名照常生效',
+          'Bip001_L_Arm' in names3 and 'ArmL' not in names3)
+    vg3 = [v.name for v in obj3.vertex_groups]
+    check('顶点组撞名: 只剩一个目标组, 原组不残留 %s' % vg3,
+          vg3.count('Bip001_L_Arm') == 1 and 'ArmL' not in vg3
+          and not any(n.startswith(skel.VG_TMP_PREFIX) for n in vg3))
+    gi = obj3.vertex_groups['Bip001_L_Arm'].index
+    got = {v.index: round(e.weight, 4) for v in mesh3.vertices
+           for e in v.groups if e.group == gi}
+    check('顶点组撞名: 两份权重按顶点相加 %s' % got,
+          got == {0: 1.0, 1: 0.5, 2: 0.5})
+    check('顶点组撞名: 合并被报告出来, 不静默 %s' % (report3['merged'],),
+          report3['merged'] == [('ClashMeshObj', 'ArmL', 'Bip001_L_Arm', 2)])
+    check('顶点组撞名: 改完之后每个组都还能对上骨骼',
+          {v.name for v in obj3.vertex_groups} <= {b.name for b in arm3.data.bones})
+
+    # 反向再跑一次: 没有撞名时不该产生任何合并, 且组名跟着骨骼回去
+    report3b = skel.apply_rename(arm3, [('Bip001_L_Arm', 'ArmL')])
+    check('顶点组: 无撞名时不合并, 组名正常跟随',
+          not report3b['merged']
+          and 'ArmL' in {v.name for v in obj3.vertex_groups}
+          and 'ArmL' in {b.name for b in arm3.data.bones})
 
     # --- 目标名冲突: 两个原名指向同一个新名 → 自动去重且被报告, 不静默覆盖 ---
     reset_blend()
