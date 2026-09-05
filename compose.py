@@ -360,7 +360,11 @@ def route_for(source, dest, edges=None, source_bones=(), dest_bones=()):
       都不用看 (实测 Illusion 只够得到 Ruri.Girl: Ruri.Boy 从 Illusion 无路可走)。
 
     收敛完还剩不止一对骨架 = 真的分不出来, 返回 None 让调用方说"得指明是哪个配置" ——
-    猜出来的答案会把动画套到另一种体型上。两端本来就是同一副时返回一条空 Route。"""
+    猜出来的答案会把动画套到另一种体型上。两端本来就是同一副时返回一条空 Route:
+    同一个名字不看任何预设就是同一副 (没有预设列过的游戏, 把自己的动画套回自己的骨架
+    也不需要表)。"""
+    if source == dest:
+        return Route(source, dest, [])
     edges = load_edges() if edges is None else edges
     starts = narrowed(sides_for(source, edges), source_bones, edges)
     finishes = narrowed(sides_for(dest, edges), dest_bones, edges)
