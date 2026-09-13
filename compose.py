@@ -362,19 +362,44 @@ def route_for(source, dest, edges=None, source_bones=(), dest_bones=()):
     收敛完还剩不止一对骨架 = 真的分不出来, 返回 None 让调用方说"得指明是哪个配置" ——
     猜出来的答案会把动画套到另一种体型上。两端本来就是同一副时返回一条空 Route:
     同一个名字不看任何预设就是同一副 (没有预设列过的游戏, 把自己的动画套回自己的骨架
-    也不需要表)。"""
-    if source == dest:
-        return Route(source, dest, [])
+    也不需要表)。
+
+    🔴 两件事的顺序是**先通路后骨名**, 反过来就是那个静默失败: 先按骨名挑配置, 挑中的
+    偏偏图上无路 ⇒ 报"没有表把这两副骨架连起来", 而**真正走得通的那个配置从头到尾没
+    被考虑过**。骨名分不出体型分支是数据的事实而不是算法不够好 —— 实测 Endfield.Boy
+    的 165 个骨名有 163 个与 Endfield.Girl 同名 (Boy 表写的就是身体那一段), 于是相似度
+    谁高谁低只取决于两张表各写了多少行: 一副 454 根骨的女角色量出来 Boy 0.354 >
+    Girl 0.254, 从 Illusion 过来的动画就一条也套不上。"""
     edges = load_edges() if edges is None else edges
-    starts = narrowed(sides_for(source, edges), source_bones, edges)
-    finishes = narrowed(sides_for(dest, edges), dest_bones, edges)
+    starts = sides_for(source, edges)
+    finishes = sides_for(dest, edges)
+    if fold(source) == fold(dest):
+        # 同一个名字 = 同一副骨架。图上认得它就用图上那副 (Route 的两端始终是 Side,
+        # 名字字符串塞进去会让 label()/direct 在别处炸), 认不得就现造一个。
+        here = narrowed(starts, source_bones or dest_bones, edges)
+        side = here[0] if here else Side(str(source or '').strip(), '')
+        return Route(side, side, [])
     if not starts or not finishes:
         return None
     shared = [side for side in starts if side in finishes]
     if shared:
         return Route(shared[0], shared[0], [])
     found = routes_between(starts, finishes, edges)
+    if len(found) > 1:
+        # 走得通的不止一条才轮到骨名: 候选此时已经是"图上真到得了"的那些。
+        starts = narrowed(_unique(route.source for route in found), source_bones, edges)
+        finishes = narrowed(_unique(route.dest for route in found), dest_bones, edges)
+        found = [route for route in found
+                 if route.source in starts and route.dest in finishes]
     return found[0] if len(found) == 1 else None
+
+
+def _unique(sides):
+    """保序去重 —— 候选顺序决定同分时取哪一个, 所以不能靠集合。"""
+    found = {}
+    for side in sides:
+        found.setdefault(side.fold_key, side)
+    return list(found.values())
 
 
 # ── 拼接 ──────────────────────────────────────────────────────────────────────
