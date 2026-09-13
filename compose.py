@@ -339,6 +339,18 @@ def narrowed(candidates, bones, edges=None):
     return [side for score, side in scored if score == best]
 
 
+def family_wide(candidates, edges=None):
+    """这些骨架所属家族在图上的**每一个**配置。
+
+    一个家族的配置是体型分支, 共用同一套骨名规范 —— 实测 Boy 的 165 个骨名有 163 个与
+    Girl 同名 (Boy 表写的就是身体那一段)。所以"这个配置没人写过表"不等于"接不上":
+    退到同家族里有表的那个配置, 比把动画整条丢掉对。落不上的行本来就是那个配置没有的骨,
+    照常跳过。"""
+    edges = load_edges() if edges is None else edges
+    families = {fold(side.family) for side in candidates}
+    return [side for side in sides(edges) if fold(side.family) in families]
+
+
 def routes_between(sources, dests, edges=None):
     """这两组骨架之间, 图上真走得通的每一条通路。"""
     edges = load_edges() if edges is None else edges
@@ -385,6 +397,9 @@ def route_for(source, dest, edges=None, source_bones=(), dest_bones=()):
     if shared:
         return Route(shared[0], shared[0], [])
     found = routes_between(starts, finishes, edges)
+    if not found:
+        # 要的那个配置没人写过表 ⇒ 退到同家族写过的那个 (见 family_wide)。
+        found = routes_between(family_wide(starts, edges), family_wide(finishes, edges), edges)
     if len(found) > 1:
         # 走得通的不止一条才轮到骨名: 候选此时已经是"图上真到得了"的那些。
         starts = narrowed(_unique(route.source for route in found), source_bones, edges)
