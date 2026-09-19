@@ -435,12 +435,35 @@ class ActionSampler:
         return out
 
 
-def action_frame_list(action, step=1.0, frame_start=None, frame_end=None):
+def action_frame_list(action, step=1.0, frame_start=None, frame_end=None,
+                      mode='STEP'):
+    """要在哪些时刻求值。
+
+    `STEP` 均匀步进 —— 每帧一个键, 也就是烘焙。
+    `SOURCE_KEYS` 取**源动作自己的关键帧时刻**: 产物的键位与源一一对应, 曲线保持
+    稀疏、可手改, 而不是逐帧钉死。手 K 的源动画 (实测参考文件里最密的控制骨 8~13 帧
+    一个键, 身体 25~100 帧一个键) 重定向之后仍然是同样的节奏, 动画师还能接着调;
+    逐帧烘出来的那份一旦生成就只能整条重来。
+    """
     fr = action.frame_range
     start = float(fr[0] if frame_start is None else frame_start)
     end = float(fr[1] if frame_end is None else frame_end)
     if end < start:
         start, end = end, start
+    if mode == 'SOURCE_KEYS':
+        moments = set()
+        for curve in action.fcurves:
+            for point in curve.keyframe_points:
+                moment = float(point.co[0])
+                if start - 1e-9 <= moment <= end + 1e-9:
+                    moments.add(round(moment, 4))
+        if moments:
+            frames = sorted(moments)
+            if abs(frames[0] - start) > 1e-9:
+                frames.insert(0, start)
+            if abs(frames[-1] - end) > 1e-9:
+                frames.append(end)
+            return frames
     step = max(0.01, float(step))
     frames, f = [], start
     while f < end - 1e-9:
@@ -553,7 +576,8 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
     """把源 Action 重定向烘焙为目标骨架的新 Action (纯数据操作)。
 
     spec: dict, 见 retarget_math.build_mappings; settings 键:
-      frame_step / interpolation('LINEAR'|'BEZIER') / suffix / overwrite /
+      frame_step / frame_mode('STEP'|'SOURCE_KEYS') /
+      interpolation('LINEAR'|'BEZIER') / suffix / overwrite /
       bake_mode('PURE'|'SCENE') / frame_start / frame_end / fake_user /
       animated_only(只重定向动作真正动了的骨: 未动骨的"静止姿势"在跨角色时经参考
       对齐会产出常量歪角 -- 实测虹膜这类叶端小骨 72.8°, 而目标自己的 rest 才是对的)
@@ -583,7 +607,8 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
 
     frames = action_frame_list(action, settings.get('frame_step', 1.0),
                                settings.get('frame_start'),
-                               settings.get('frame_end'))
+                               settings.get('frame_end'),
+                               settings.get('frame_mode', 'STEP'))
     bake_mode = settings.get('bake_mode', 'PURE')
 
     bases_per_frame = []
