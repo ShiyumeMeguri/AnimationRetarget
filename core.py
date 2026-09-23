@@ -452,7 +452,7 @@ def action_frame_list(action, step=1.0, frame_start=None, frame_end=None,
         start, end = end, start
     if mode == 'SOURCE_KEYS':
         moments = set()
-        for curve in action.fcurves:
+        for curve in iter_action_fcurves(action):
             for point in curve.keyframe_points:
                 moment = float(point.co[0])
                 if start - 1e-9 <= moment <= end + 1e-9:
