@@ -945,7 +945,8 @@ def register_handlers():
 
 
 def unregister_handlers():
+    # 只认本模块的:按名字认会把别的插件同名的处理器(_on_load_post 之类)一起删掉。重载后函数换了对象,模块名不变。
     for collection, fn in _handlers:
         for h in list(collection):
-            if getattr(h, '__name__', '') == fn.__name__:
+            if getattr(h, '__module__', '') == fn.__module__ and getattr(h, '__name__', '') == fn.__name__:
                 collection.remove(h)
