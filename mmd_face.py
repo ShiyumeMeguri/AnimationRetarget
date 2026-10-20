@@ -35,11 +35,12 @@ def read_vmd_morphs(path):
         frame, weight = struct.unpack_from("<If", data, base + 15)
         series.setdefault(name, []).append((frame, weight))
     length = max(frame for keys in series.values() for frame, _ in keys) + 1
+    key_frames = sorted({frame for keys in series.values() for frame, _ in keys} | {0, length - 1})
     timelines = {}
     for name, keys in series.items():
         keys.sort()
         timelines[name] = numpy.interp(numpy.arange(length), [frame for frame, _ in keys], [weight for _, weight in keys])
-    return timelines, length
+    return timelines, length, key_frames
 
 
 def asset_weights(morph_state, skeletal_morph, name, at=0.0, side=None, prefixes=None):
@@ -139,7 +140,12 @@ def reduce_keys(frames, values, tolerance):
     return numpy.flatnonzero(keep)
 
 
-def solve_curves(binding, rows, corrections, first_frame):
+def solve_curves(binding, rows, corrections, first_frame, key_frames=None, simplify=0.0):
+    if key_frames is not None:
+        rows = [rows[frame] for frame in key_frames]
+        frame_numbers = numpy.array(key_frames, dtype=numpy.float64)
+    else:
+        frame_numbers = numpy.arange(len(rows), dtype=numpy.float64)
     animated = set()
     for row in rows:
         animated |= set(row)
@@ -152,7 +158,7 @@ def solve_curves(binding, rows, corrections, first_frame):
             offsets.setdefault(bone, []).append((numpy.array(correction.get("Offset", (0.0, 0.0, 0.0)), dtype=numpy.float64), numpy.array(correction.get("Scale", (1.0, 1.0, 1.0)), dtype=numpy.float64), weight))
     bones = set(binding.bones_for(animated)) | {bone for bone in offsets if bone in binding.governed_bones}
     count = len(rows)
-    frames = numpy.arange(count, dtype=numpy.float64) + first_frame
+    frames = frame_numbers + first_frame
     keys = [tuple(sorted(row.items())) for row in rows]
     cache = {}
     curves = []
@@ -175,7 +181,7 @@ def solve_curves(binding, rows, corrections, first_frame):
         for channel, values in (("location", locations), ("rotation_quaternion", quaternions), ("scale", scales)):
             for axis in range(values.shape[1]):
                 column = values[:, axis].astype(numpy.float64)
-                kept = reduce_keys(frames, column, CHANNEL_TOLERANCE[channel])
+                kept = reduce_keys(frames, column, CHANNEL_TOLERANCE[channel] * simplify) if simplify > 0.0 else numpy.arange(count)
                 co = numpy.empty(len(kept) * 2, dtype=numpy.float64)
                 co[0::2] = frames[kept]
                 co[1::2] = column[kept]
