@@ -168,7 +168,7 @@ JSON 配置即面板里的预设文件 (设置菜单可导出), 结构:
 ```json
 { "format": "AnimationRetarget", "version": 2,
   "source_armature": "SrcRig", "dest_armature": "DstRig",
-  "settings": {"frame_step": 1.0, "suffix": "_baked", "bake_mode": "PURE"},
+  "settings": {"frame_mode": "SOURCE_KEYS", "frame_step": 1.0, "suffix": "_baked", "bake_mode": "PURE"},
   "mappings": [
     {"source": "hips", "dest": "Hips",
      "rot": {"auto": true, "ortho": false, "offset": [0,0,0], "align": null},

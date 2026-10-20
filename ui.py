@@ -155,7 +155,9 @@ class ANIMRET_MT_settings(bpy.types.Menu):
         layout.separator()
         layout.prop(s, 'bake_mode')
         layout.prop(s, 'interpolation')
-        layout.prop(s, 'frame_step')
+        layout.prop(s, 'frame_mode')
+        if s.frame_mode == 'STEP':
+            layout.prop(s, 'frame_step')
         layout.separator()
         layout.prop(s, 'suffix')
         layout.prop(s, 'overwrite')

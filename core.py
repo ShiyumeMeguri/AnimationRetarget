@@ -436,10 +436,10 @@ class ActionSampler:
 
 
 def action_frame_list(action, step=1.0, frame_start=None, frame_end=None,
-                      mode='STEP'):
+                      mode='SOURCE_KEYS'):
     """要在哪些时刻求值。
 
-    `STEP` 均匀步进 —— 每帧一个键, 也就是烘焙。
+    `STEP` 均匀步进 —— 每帧一个键, 也就是全烘, 需要时手动选。
     `SOURCE_KEYS` 取**源动作自己的关键帧时刻**: 产物的键位与源一一对应, 曲线保持
     稀疏、可手改, 而不是逐帧钉死。手 K 的源动画 (实测参考文件里最密的控制骨 8~13 帧
     一个键, 身体 25~100 帧一个键) 重定向之后仍然是同样的节奏, 动画师还能接着调;
@@ -506,6 +506,35 @@ def src_world_mats_scene(src_obj, depsgraph, needed_names):
         world[n] = w @ pb.matrix
         bases[n] = pb.matrix_basis.copy()
     return world, bases
+
+
+MOVED_EPSILON = 1e-4
+
+
+def evaluated_moved_bones(ev, names):
+    """评估后相对最近的被映射祖先偏离 rest 的骨: IK/约束带动的骨没有曲线, 未映射的
+    中间骨 (中心/扭转骨) 带来的运动也不挂在它自己名下, 只有评估结果看得出它动了。"""
+    mapped = set(names)
+    moved = set()
+    identity = Matrix.Identity(4)
+    for n in names:
+        pb = ev.pose.bones.get(n)
+        if pb is None:
+            continue
+        anchor = pb.parent
+        while anchor is not None and anchor.name not in mapped:
+            anchor = anchor.parent
+        if anchor is None:
+            rest_local, local = pb.bone.matrix_local, pb.matrix
+        else:
+            rest_local = anchor.bone.matrix_local.inverted_safe() \
+                @ pb.bone.matrix_local
+            local = anchor.matrix.inverted_safe() @ pb.matrix
+        deviation = rest_local.inverted_safe() @ local
+        if any(abs(deviation[r][c] - identity[r][c]) > MOVED_EPSILON
+               for r in range(3) for c in range(4)):
+            moved.add(n)
+    return moved
 
 
 # ---------------------------------------------------------------------------
@@ -576,11 +605,13 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
     """把源 Action 重定向烘焙为目标骨架的新 Action (纯数据操作)。
 
     spec: dict, 见 retarget_math.build_mappings; settings 键:
-      frame_step / frame_mode('STEP'|'SOURCE_KEYS') /
+      frame_mode('SOURCE_KEYS' 默认, 只在源关键帧时刻求值|'STEP' 逐步长全烘) / frame_step(仅 STEP) /
       interpolation('LINEAR'|'BEZIER') / suffix / overwrite /
       bake_mode('PURE'|'SCENE') / frame_start / frame_end / fake_user /
       animated_only(只重定向动作真正动了的骨: 未动骨的"静止姿势"在跨角色时经参考
-      对齐会产出常量歪角 -- 实测虹膜这类叶端小骨 72.8°, 而目标自己的 rest 才是对的)
+      对齐会产出常量歪角 -- 实测虹膜这类叶端小骨 72.8°, 而目标自己的 rest 才是对的;
+      PURE 看动作曲线引用了谁, SCENE 看评估后相对最近被映射祖先偏离 rest 的骨 --
+      IK/约束带动的腿骨、未映射中间骨带动的下半身都没有自己的曲线)
     返回 (dest_action, info dict)。
     """
     settings = settings or {}
@@ -593,8 +624,12 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
     dest_skel = snapshot_skeleton(dest_obj)
     mappings, warnings = rm.build_mappings(src_skel, dest_skel,
                                            spec.get('mappings', []))
-    if settings.get('animated_only'):
-        provided = settings.get('animated_bones')
+    bake_mode = settings.get('bake_mode', 'PURE')
+    animated_only = bool(settings.get('animated_only'))
+    provided = settings.get('animated_bones')
+    judge_by_evaluation = animated_only and provided is None \
+        and bake_mode == 'SCENE'
+    if animated_only and not judge_by_evaluation:
         if provided is not None:
             animated = set(provided)
         else:
@@ -608,8 +643,7 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
     frames = action_frame_list(action, settings.get('frame_step', 1.0),
                                settings.get('frame_start'),
                                settings.get('frame_end'),
-                               settings.get('frame_mode', 'STEP'))
-    bake_mode = settings.get('bake_mode', 'PURE')
+                               settings.get('frame_mode', 'SOURCE_KEYS'))
 
     bases_per_frame = []
     if bake_mode == 'SCENE':
@@ -635,13 +669,15 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
                 pb.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
                 pb.scale = (1.0, 1.0, 1.0)
             assign_action(src_obj, action)
+            sampled, moved = [], set()
             for f in frames:
                 scene.frame_set(int(f), subframe=max(0.0, min(0.999999, f - int(f))))
                 dg = depsgraph_step() if depsgraph_step else \
                     bpy.context.evaluated_depsgraph_get()
-                world, src_bases = src_world_mats_scene(src_obj, dg, needed)
-                bases_per_frame.append(
-                    rm.solve_frame(dest_skel, mappings, world, src_bases))
+                sampled.append(src_world_mats_scene(src_obj, dg, needed))
+                if judge_by_evaluation:
+                    moved |= evaluated_moved_bones(
+                        src_obj.evaluated_get(dg), needed)
         finally:
             ad.action = saved[0]
             if saved[1] is not None and hasattr(ad, 'action_slot'):
@@ -654,6 +690,12 @@ def bake_action(src_obj, dest_obj, spec, action, settings=None, depsgraph_step=N
                 pb.rotation_euler, pb.rotation_axis_angle = eul, aa
                 pb.scale = sca
             scene.frame_set(int(saved[2]), subframe=saved[3])
+        if judge_by_evaluation:
+            mappings = [m for m in mappings if m.src_name in moved]
+            if not mappings:
+                raise ValueError('没有有效映射, 无法烘焙')
+        bases_per_frame = [rm.solve_frame(dest_skel, mappings, world, src_bases)
+                           for world, src_bases in sampled]
     else:
         sampler = ActionSampler(src_obj, src_skel, action)
         for f in frames:

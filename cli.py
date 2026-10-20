@@ -86,7 +86,8 @@ def parse_args(argv):
     common(sp)
     sp.add_argument('--actions', help='动作名通配符, 逗号分隔, 如 "Walk*,Run*" (默认: 全部可烘动作)')
     sp.add_argument('--suffix', help='产物后缀 (默认取配置, 再默认 _baked)')
-    sp.add_argument('--step', type=float, help='帧步长')
+    sp.add_argument('--step', type=float, help='帧步长(隐含逐帧全烘)')
+    sp.add_argument('--frame-mode', choices=['SOURCE_KEYS', 'STEP'], help='取帧: 源关键帧(默认) / 逐帧全烘')
     sp.add_argument('--frame-range', help='帧范围覆盖 A:B')
     sp.add_argument('--mode', choices=['PURE', 'SCENE'], help='采样模式')
     sp.add_argument('--interp', choices=['LINEAR', 'BEZIER'], help='关键帧插值')
@@ -252,6 +253,7 @@ def resolve_rigs(args, spec):
 
 def build_settings(args, spec):
     settings = dict(spec.get('settings') or {})
+    settings.setdefault('frame_mode', 'SOURCE_KEYS')
     settings.setdefault('frame_step', 1.0)
     settings.setdefault('interpolation', 'LINEAR')
     settings.setdefault('suffix', '_baked')
@@ -262,6 +264,9 @@ def build_settings(args, spec):
         settings['suffix'] = args.suffix
     if args.step is not None:
         settings['frame_step'] = args.step
+        settings['frame_mode'] = 'STEP'
+    if args.frame_mode:
+        settings['frame_mode'] = args.frame_mode
     if args.mode:
         settings['bake_mode'] = args.mode
     if args.interp:

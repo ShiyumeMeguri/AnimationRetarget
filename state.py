@@ -319,8 +319,14 @@ class AnimRetState(bpy.types.PropertyGroup):
         override={'LIBRARY_OVERRIDABLE'})
 
     # --- 烘焙设置 ---
+    frame_mode: bpy.props.EnumProperty(
+        name='取帧', default='SOURCE_KEYS',
+        items=(('SOURCE_KEYS', '源关键帧', '只在源动作自己的关键帧时刻求值, 产物保持稀疏、可手改'),
+               ('STEP', '逐帧全烘', '按帧步长均匀取点, 每步一个键')),
+        override={'LIBRARY_OVERRIDABLE'})
     frame_step: bpy.props.FloatProperty(
         name='帧步长', default=1.0, min=0.01, soft_max=10.0,
+        description='仅"逐帧全烘"使用',
         override={'LIBRARY_OVERRIDABLE'})
     interpolation: bpy.props.EnumProperty(
         name='插值', default='LINEAR',
@@ -499,6 +505,7 @@ class AnimRetState(bpy.types.PropertyGroup):
 
     def settings_spec(self):
         return {
+            'frame_mode': self.frame_mode,
             'frame_step': self.frame_step,
             'interpolation': self.interpolation,
             'suffix': self.suffix,
@@ -548,6 +555,8 @@ class AnimRetState(bpy.types.PropertyGroup):
                 m.loc_scale_mode = 'AUTO'
         self.active_mapping = 0 if len(self.mappings) else -1
         settings = spec.get('settings', {})
+        if settings.get('frame_mode') in {'SOURCE_KEYS', 'STEP'}:
+            self.frame_mode = settings['frame_mode']
         if 'frame_step' in settings:
             self['frame_step'] = float(settings['frame_step'])
         if settings.get('interpolation') in {'LINEAR', 'BEZIER'}:
